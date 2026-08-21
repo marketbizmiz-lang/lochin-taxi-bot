@@ -30,7 +30,7 @@ from aiogram.types import (
 
 
 # ============================================================
-# CONFIG
+# CONFIG (Бу ерда ўзингизнинг маълумотларингизни ёзинг!)
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,6 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lochin_taxi_bot")
 
+# BOT_TOKEN и ADMIN_IDS Рендер (Render) Environment дан олинади!
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
 PORT = int(os.getenv("PORT", "8080"))
@@ -57,10 +58,10 @@ ADMIN_IDS = {
     if x.strip() and x.strip().lstrip("-").isdigit()
 }
 
-# Links
-CHANNEL_LINK = os.getenv("CHANNEL_LINK", "").strip()
-DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "").strip()
-SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998712345678").strip()
+# Links (Энди бу ерга тўғри қийматлар киритилди!)
+CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/lochin_taxi").strip() # Ўзингизникига ўзгартиринг
+DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+W_kuVbWJydBiM2Uy").strip() # Сизнинг группа линкангиз
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip() # Сиз берган рақам
 SUPPORT_TG = os.getenv("SUPPORT_TG", "@lochin_support").strip()
 
 # Settings
@@ -78,7 +79,6 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Routers (Расмдагидек, иккала Router ҳам ишлатилади)
 driver_router = Router()
 admin_router = Router()
 web_router = web.RouteTableDef()
@@ -216,7 +216,7 @@ TEXTS: dict[str, dict[str, str]] = {
         "news_date": "Sana",
         "news_views": "Ko'rishlar",
         
-        # Support
+        # Support (ЁРДАМ МАЪЛУМОТЛАРИ)
         "support_title": "🆘 <b>Yordam</b>",
         "support_phone": "📞 Telefon",
         "support_tg": "📱 Telegram",
@@ -991,7 +991,7 @@ def language_keyboard() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# HANDLERS (МУҲИМ ҚИСМ: Барча тугмалар ишлаши учун)
+# HANDLERS
 # ============================================================
 
 @driver_router.message(CommandStart())
@@ -1029,7 +1029,6 @@ async def set_language_callback(callback: CallbackQuery) -> None:
         )
     await callback.answer()
 
-# Глобал "cancel" текширувчи функция: FSM ичида "❌ Bekor qilish" босилса
 async def is_cancel(message: Message) -> bool:
     return message.text in [TEXTS['uz']['cancel'], TEXTS['ru']['cancel']]
 
@@ -1180,8 +1179,7 @@ async def register_car_number(message: Message, state: FSMContext) -> None:
             reply_markup=welcome_keyboard(message.from_user.id)
         )
 
-# ================== АСОСИЙ МЕНЮ ТУГМАЛАРИ (ЮҚОРИДАГИ БОТ ТУХТАБ ҚОЛАЁТГАН ЖОЙ) ==================
-# Энди ҳар бир тугма ишлайдиган бўлди
+# ================== МЕНЮ ТУГМАЛАРИ ==================
 
 @driver_router.message(F.text.in_([TEXTS['uz']['menu_balance'], TEXTS['ru']['menu_balance']]))
 async def menu_balance(message: Message) -> None:
@@ -1261,7 +1259,6 @@ async def withdraw_amount(message: Message, state: FSMContext) -> None:
         reply_markup=withdraw_type_keyboard(message.from_user.id)
     )
 
-# Барча турдаги тугмаларни ушлайдиган ҳендлер (Карта, Нақд, БРБ)
 @driver_router.message(F.text.in_([TEXTS['uz']['withdraw_type_card'], TEXTS['ru']['withdraw_type_card'],
                                    TEXTS['uz']['withdraw_type_cash'], TEXTS['ru']['withdraw_type_cash'],
                                    TEXTS['uz']['withdraw_type_brb'], TEXTS['ru']['withdraw_type_brb']]))
@@ -1271,10 +1268,11 @@ async def withdraw_type(message: Message, state: FSMContext) -> None:
         await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
         return
     
-    payment_type = message.text.split()[-1]  # 'kartaga', 'naqd', 'brb'
+    # Ушбу қаторда payment_type ни тўғри ажратиб оламиз
+    payment_type = "card" if "Kartaga" in message.text or "карту" in message.text else "cash" if "Naqd" in message.text or "Налич" in message.text else "brb"
     await state.update_data(payment_type=payment_type)
     
-    if payment_type in ["Kartaga", "На карту", "kartaga"]:
+    if payment_type == "card":
         await state.set_state(WithdrawStates.card_number)
         await message.answer(t(message.from_user.id, "withdraw_card_ask"))
     else:
@@ -1414,9 +1412,10 @@ async def menu_group(message: Message) -> None:
 
 @driver_router.message(F.text.in_([TEXTS['uz']['menu_support'], TEXTS['ru']['menu_support']]))
 async def menu_support(message: Message) -> None:
+    # Бу ерда сиз берган рақам ва телеграм аккаунт кўрсатилади
     await message.answer(
         f"{t(message.from_user.id, 'support_title')}\n\n"
-        f"{t(message.from_user.id, 'support_phone')}: {SUPPORT_PHONE}\n"
+        f"{t(message.from_user.id, 'support_phone')}: <b>{SUPPORT_PHONE}</b>\n"
         f"{t(message.from_user.id, 'support_tg')}: {SUPPORT_TG}\n"
         f"{t(message.from_user.id, 'support_text')}"
     )
@@ -1445,7 +1444,6 @@ async def menu_admin(message: Message) -> None:
     else:
         await message.answer(t(message.from_user.id, "not_admin"))
 
-# Админ бўлими тугмалари
 @driver_router.message(F.text.in_([TEXTS['uz']['admin_drivers'], TEXTS['ru']['admin_drivers']]))
 async def admin_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -1530,7 +1528,6 @@ async def main() -> None:
     init_db()
     register_routers()
     
-    # Web server
     app = web.Application()
     app.add_routes(web_router)
     runner = web.AppRunner(app)
@@ -1542,7 +1539,6 @@ async def main() -> None:
     logger.info(f"✅ Bot running on port {PORT}")
     logger.info(f"✅ Web server started")
     
-    # Муҳим: Webhook'ни ўчириб, Polling'ни ишга туширамиз (409 хатоликни олдини олади)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
