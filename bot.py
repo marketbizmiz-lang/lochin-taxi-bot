@@ -234,8 +234,9 @@ def complete_registration(telegram_id: int, full_name: str, phone: str, card_num
         position = f"LCH-{code}"
     
     now = utc_now_iso()
+    # ✅ ТУЗАТИЛДИ: Ортиқча вергул олиб ташланди!
     conn.execute("""
-        UPDATE users SET full_name=?, phone=?, card_number=?, car_model=?, car_number=?, position=?, is_registered=1, updated_at=?, 
+        UPDATE users SET full_name=?, phone=?, card_number=?, car_model=?, car_number=?, position=?, is_registered=1, updated_at=?
         WHERE telegram_id=?
     """, (full_name, phone, card_number, car_model, car_number, position, now, telegram_id))
     conn.commit()
@@ -407,7 +408,6 @@ async def register_car_number(message: Message, state: FSMContext):
     if position:
         await message.answer(f"✅ <b>Tabriklaymiz!</b>\n\nSiz {BOT_NAME} tizimida muvaffaqiyatli ro'yxatdan o'tdingiz!\n\n🆔 Sizning POSITIONingiz: <code>{position}</code>\n\n🔑 Bu kod shaxsiy identifikatoringiz.", reply_markup=user_main_menu(message.from_user.id))
         
-        # Админга хабар юбориш
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(admin_id, f"✅ Yangi haydovchi ro'yxatdan o'tdi!\n👤 {data.get('full_name')}\n📱 {data.get('phone')}\n🚗 {data.get('car_model')} - {car_number}")
@@ -417,7 +417,7 @@ async def register_car_number(message: Message, state: FSMContext):
 
 
 # ============================================================
-# АСОСИЙ МЕНЮ ФУНКЦИЯЛАРИ (Ҳар бир хайдовчи фақат ўзиникини кўради!)
+# АСОСИЙ МЕНЮ ФУНКЦИЯЛАРИ
 # ============================================================
 
 @driver_router.message(F.text == "💰 Balans")
@@ -435,17 +435,14 @@ async def show_today_orders(message: Message):
         await message.answer("Avval ro'yxatdan o'ting. /start bosing.")
         return
     
-    # Яндекс API дан хайдовчи заказларини олиш (Умумий статистика)
     stats_text = ""
     if user.get("yandex_driver_id"):
-        # Яндексга сўров юборамиз
         data = await yandex_api_request("driver-metrics", method="POST", payload={
             "park_id": YANDEX_PARK_ID,
             "driver_id": user["yandex_driver_id"],
             "date_from": datetime.now().date().isoformat() + "T00:00:00Z",
             "date_to": datetime.now().isoformat()
         })
-        # (Бу ерда маълумотни таҳлил қилиш керак, оддий кўриниш учун)
         stats_text = "📊 Яндекс дан маълумот олинмоқда..."
     else:
         stats_text = "📭 Siz hali Yandex bilan bog'lanmagansiz. Admin bilan bog'laning."
@@ -507,7 +504,6 @@ async def process_withdraw_card(message: Message, state: FSMContext):
     w_id = create_withdrawal(message.from_user.id, data["amount"], data["payment_type"], card_number=card)
     await state.clear()
     if w_id:
-        # Админга хабар
         for admin_id in ADMIN_IDS:
             await bot.send_message(admin_id, f"💸 <b>Yangi pul yechish so'rovi!</b>\nID: #{w_id}\nHaydovchi: {message.from_user.full_name}\nSumma: {data['amount']:,} so'm\nKarta: {card}")
         await message.answer("✅ Arizangiz qabul qilindi! Admin tasdiqlagach pul tushadi.", reply_markup=user_main_menu(message.from_user.id))
@@ -538,7 +534,6 @@ async def show_profile(message: Message):
     if not user or user["is_registered"] == 0:
         await message.answer("Avval ro'yxatdan o'ting. /start bosing.")
         return
-    # ТУЗАТИЛГАН ҚАТОР: 'Yo\'q' ўрнига 'Mavjud emas' ишлатилди
     await message.answer(f"👤 <b>Profil</b>\n\nIsm: {user['full_name']}\nTelefon: {user['phone']}\nMashina: {user['car_model']} | {user['car_number']}\nPOSITION: <code>{user['position']}</code>\nYandex ID: <code>{user.get('yandex_driver_id') or 'Mavjud emas'}</code>", reply_markup=user_main_menu(message.from_user.id))
 
 @driver_router.message(F.text == "💬 Haydovchilar guruhi")
@@ -551,7 +546,7 @@ async def show_support(message: Message):
 
 
 # ============================================================
-# АДМИН ПАНЕЛ (Фақат Админ ишлатади)
+# АДМИН ПАНЕЛ
 # ============================================================
 
 @driver_router.message(F.text == "🛠 Admin")
@@ -602,7 +597,6 @@ async def admin_add_driver_tg_id(message: Message, state: FSMContext):
         await message.answer("❌ Noto'g'ri ID.")
         return
     
-    # Текшириш: бу одам базада борми?
     user = get_user_by_telegram(tg_id)
     if not user:
         await message.answer("❌ Bu Telegram ID tizimda topilmadi. Haydovchi avval botga kirishi kerak.")
@@ -634,7 +628,7 @@ async def admin_back(message: Message):
 
 
 # ============================================================
-# WEB ROUTES (Render учун)
+# WEB ROUTES
 # ============================================================
 
 @web_router.get("/")
