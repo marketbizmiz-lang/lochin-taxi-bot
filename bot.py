@@ -49,7 +49,7 @@ PORT = int(os.getenv("PORT", "8080"))
 BOT_NAME = os.getenv("BOT_NAME", "LOCHIN TAXI").strip() or "LOCHIN TAXI"
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "uz").strip() or "uz"
 
-# Admin IDs
+# Admin IDs - бу ерга ўз Telegram ID ингизни ёзинг!
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
 ADMIN_IDS = {
     int(x.strip())
@@ -172,9 +172,6 @@ TEXTS: dict[str, dict[str, str]] = {
         "balance_current": "Joriy balans",
         "balance_blocked": "Bloklangan balans",
         "balance_available": "Mavjud balans",
-        "balance_withdraw": "Pul yechish",
-        "balance_add": "Balansni to'ldirish",
-        "balance_history": "To'lovlar tarixi",
         
         # Orders
         "orders_today_title": "📊 <b>Bugungi buyurtmalar</b>",
@@ -186,10 +183,6 @@ TEXTS: dict[str, dict[str, str]] = {
         "order_id": "Buyurtma raqami",
         "order_time": "Vaqt",
         "order_amount": "Summa",
-        "order_distance": "Masofa",
-        "order_from": "Qayerdan",
-        "order_to": "Qayerga",
-        "order_status": "Holati",
         
         # Withdraw
         "withdraw_title": f"💸 <b>{BOT_NAME} dan pul yechish</b>",
@@ -246,37 +239,26 @@ TEXTS: dict[str, dict[str, str]] = {
         # Settings
         "settings_title": "⚙️ <b>Sozlamalar</b>",
         "settings_lang": "🌐 Til",
-        "settings_notifications": "🔔 Bildirishnomalar",
-        "settings_auto_withdraw": "💰 Avtomatik pul yechish",
-        "settings_auto_withdraw_min": "Avtomatik yechish chegarasi",
         "settings_saved": "✅ Sozlamalar saqlandi!",
         
         # Common
         "yes": "✅ Ha",
         "no": "❌ Yo'q",
-        "skip": "⏭ O'tkazib yuborish",
         "back": "⬅️ Orqaga",
         "cancel": "❌ Bekor qilish",
-        "confirm": "✅ Tasdiqlash",
         "action_cancelled": "Amal bekor qilindi ❌",
         "invalid_input": "❌ Noto'g'ri ma'lumot, qaytadan kiriting",
-        "not_found": "❌ Ma'lumot topilmadi",
+        
+        # Language
+        "lang_updated": "✅ Til muvaffaqiyatli o'zgartirildi!",
+        "choose_language": "🌐 Tilni tanlang:\n\nВыберите язык:",
         
         # Statuses
         "status_new": "🆕 Yangi",
-        "status_accepted": "✅ Qabul qilingan",
-        "status_in_progress": "🚕 Yo'lda",
         "status_completed": "✅ Bajarilgan",
         "status_cancelled": "❌ Bekor qilingan",
-        "status_failed": "❌ Muvaffaqiyatsiz",
-        
         "payment_pending": "⏳ Kutilmoqda",
         "payment_completed": "✅ To'langan",
-        "payment_failed": "❌ Xato",
-        "payment_cancelled": "❌ Bekor",
-        
-        # Language update
-        "lang_updated": "✅ Til muvaffaqiyatli o'zgartirildi!",
     },
     "ru": {
         # Welcome & Registration
@@ -352,24 +334,15 @@ TEXTS: dict[str, dict[str, str]] = {
         "balance_current": "Текущий баланс",
         "balance_blocked": "Заблокированный баланс",
         "balance_available": "Доступный баланс",
-        "balance_withdraw": "Вывести средства",
-        "balance_add": "Пополнить баланс",
-        "balance_history": "История платежей",
         
         # Orders
         "orders_today_title": "📊 <b>Сегодняшние заказы</b>",
         "orders_today_empty": "Сегодня нет заказов 📭",
         "orders_total": "Всего заказов",
         "orders_earnings": "Заработок",
-        "orders_completed": "Выполнено",
-        "orders_cancelled": "Отменено",
         "order_id": "Номер заказа",
         "order_time": "Время",
         "order_amount": "Сумма",
-        "order_distance": "Расстояние",
-        "order_from": "Откуда",
-        "order_to": "Куда",
-        "order_status": "Статус",
         
         # Withdraw
         "withdraw_title": f"💸 <b>Вывод средств из {BOT_NAME}</b>",
@@ -426,44 +399,30 @@ TEXTS: dict[str, dict[str, str]] = {
         # Settings
         "settings_title": "⚙️ <b>Настройки</b>",
         "settings_lang": "🌐 Язык",
-        "settings_notifications": "🔔 Уведомления",
-        "settings_auto_withdraw": "💰 Автоматический вывод",
-        "settings_auto_withdraw_min": "Порог автоматического вывода",
         "settings_saved": "✅ Настройки сохранены!",
         
         # Common
         "yes": "✅ Да",
         "no": "❌ Нет",
-        "skip": "⏭ Пропустить",
         "back": "⬅️ Назад",
         "cancel": "❌ Отмена",
-        "confirm": "✅ Подтвердить",
         "action_cancelled": "Действие отменено ❌",
         "invalid_input": "❌ Неверные данные, попробуйте снова",
-        "not_found": "❌ Данные не найдены",
+        
+        # Language
+        "lang_updated": "✅ Язык успешно изменен!",
+        "choose_language": "🌐 Выберите язык:\n\nTilni tanlang:",
         
         # Statuses
         "status_new": "🆕 Новый",
-        "status_accepted": "✅ Принят",
-        "status_in_progress": "🚕 В пути",
         "status_completed": "✅ Выполнен",
         "status_cancelled": "❌ Отменён",
-        "status_failed": "❌ Неудачный",
-        
         "payment_pending": "⏳ Ожидает",
         "payment_completed": "✅ Оплачен",
-        "payment_failed": "❌ Ошибка",
-        "payment_cancelled": "❌ Отменён",
-        
-        # Language update
-        "lang_updated": "✅ Язык успешно изменен!",
     }
 }
 
 SUPPORTED_LANGS = ("uz", "ru")
-ORDER_STATUSES = ("new", "accepted", "in_progress", "completed", "cancelled", "failed")
-PAYMENT_STATUSES = ("pending", "completed", "failed", "cancelled")
-WITHDRAWAL_STATUSES = ("pending", "processing", "completed", "failed", "cancelled")
 
 
 # ============================================================
@@ -482,7 +441,6 @@ def init_db() -> None:
     conn = get_db()
     cur = conn.cursor()
     
-    # Users table with all registration fields
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -502,8 +460,6 @@ def init_db() -> None:
             is_blocked INTEGER DEFAULT 0,
             block_reason TEXT,
             is_registered INTEGER DEFAULT 0,
-            yandex_driver_id TEXT,
-            yandex_park_id TEXT,
             total_orders INTEGER DEFAULT 0,
             total_earnings REAL DEFAULT 0,
             rating REAL DEFAULT 5.0,
@@ -517,7 +473,6 @@ def init_db() -> None:
         )
     """)
     
-    # Transactions table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -526,15 +481,12 @@ def init_db() -> None:
             payment_type TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             description TEXT,
-            external_id TEXT,
-            external_data TEXT,
             created_at TEXT NOT NULL,
             completed_at TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
     
-    # Withdrawals table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -546,10 +498,7 @@ def init_db() -> None:
             card_number TEXT,
             phone_number TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
-            external_id TEXT,
-            external_data TEXT,
             admin_approved_by INTEGER,
-            admin_approved_at TEXT,
             created_at TEXT NOT NULL,
             completed_at TEXT,
             cancelled_at TEXT,
@@ -557,39 +506,20 @@ def init_db() -> None:
         )
     """)
     
-    # Orders table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             driver_id INTEGER NOT NULL,
-            yandex_order_id TEXT UNIQUE,
-            yandex_data TEXT,
             amount REAL NOT NULL,
             commission REAL DEFAULT 0,
             net_amount REAL NOT NULL,
-            distance REAL,
-            duration INTEGER,
-            wait_time INTEGER,
-            start_address TEXT,
-            end_address TEXT,
-            start_lat REAL,
-            start_lng REAL,
-            end_lat REAL,
-            end_lng REAL,
             status TEXT NOT NULL DEFAULT 'new',
             payment_status TEXT NOT NULL DEFAULT 'pending',
-            customer_name TEXT,
-            customer_phone TEXT,
-            customer_rating REAL,
-            started_at TEXT,
-            completed_at TEXT,
-            cancelled_at TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY (driver_id) REFERENCES users(id)
         )
     """)
     
-    # News table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS news (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -597,7 +527,6 @@ def init_db() -> None:
             title_ru TEXT,
             content_uz TEXT,
             content_ru TEXT,
-            image_url TEXT,
             image_file_id TEXT,
             is_active INTEGER DEFAULT 1,
             is_pinned INTEGER DEFAULT 0,
@@ -609,7 +538,6 @@ def init_db() -> None:
         )
     """)
     
-    # Driver logs
     cur.execute("""
         CREATE TABLE IF NOT EXISTS driver_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -621,12 +549,9 @@ def init_db() -> None:
         )
     """)
     
-    # Indexes
     cur.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram ON users(telegram_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_users_position ON users(position)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_driver ON orders(driver_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_yandex ON orders(yandex_order_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_withdrawals_user ON withdrawals(user_id)")
     
@@ -691,21 +616,18 @@ def is_valid_card(card: str) -> bool:
     return bool(re.fullmatch(r"\d{16}", card))
 
 def generate_position() -> str:
-    """Generate unique POSITION code"""
     import random
     import string
-    # Format: LCH-XXXXX (e.g., LCH-A1B2C)
     chars = string.ascii_uppercase + string.digits
     code = ''.join(random.choices(chars, k=5))
     position = f"LCH-{code}"
     
-    # Check if unique
     conn = get_db()
     exists = conn.execute("SELECT id FROM users WHERE position = ?", (position,)).fetchone()
     conn.close()
     
     if exists:
-        return generate_position()  # Recursive until unique
+        return generate_position()
     return position
 
 def upsert_user(telegram_id: int, username: Optional[str], full_name: Optional[str]) -> dict:
@@ -754,10 +676,8 @@ def complete_registration(
     car_model: str,
     car_number: str
 ) -> Optional[str]:
-    """Complete driver registration and return position"""
     conn = get_db()
     
-    # Check if already registered
     existing = conn.execute(
         "SELECT is_registered FROM users WHERE telegram_id = ?", (telegram_id,)
     ).fetchone()
@@ -766,7 +686,6 @@ def complete_registration(
         conn.close()
         return None
     
-    # Generate unique position
     position = generate_position()
     now = utc_now_iso()
     
@@ -794,12 +713,6 @@ def complete_registration(
 def get_user_by_telegram(telegram_id: int) -> Optional[dict]:
     conn = get_db()
     row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-def get_user_by_id(user_id: int) -> Optional[dict]:
-    conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -974,214 +887,6 @@ def create_withdrawal(
     conn.close()
     return withdrawal_id
 
-def get_pending_withdrawals(limit: int = 50) -> List[dict]:
-    conn = get_db()
-    rows = conn.execute(
-        """
-        SELECT w.*, u.telegram_id, u.full_name, u.username, u.phone
-        FROM withdrawals w
-        JOIN users u ON w.user_id = u.id
-        WHERE w.status = 'pending'
-        ORDER BY w.created_at ASC LIMIT ?
-        """,
-        (limit,)
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def approve_withdrawal(withdrawal_id: int, admin_telegram_id: int) -> bool:
-    conn = get_db()
-    cur = conn.cursor()
-    now = utc_now_iso()
-    
-    withdrawal = cur.execute(
-        "SELECT * FROM withdrawals WHERE id = ?", (withdrawal_id,)
-    ).fetchone()
-    
-    if not withdrawal or withdrawal["status"] != "pending":
-        conn.close()
-        return False
-    
-    admin = cur.execute(
-        "SELECT id FROM users WHERE telegram_id = ?", (admin_telegram_id,)
-    ).fetchone()
-    
-    if not admin:
-        conn.close()
-        return False
-    
-    cur.execute(
-        """
-        UPDATE withdrawals SET 
-            status = 'completed', 
-            admin_approved_by = ?, 
-            admin_approved_at = ?,
-            completed_at = ?
-        WHERE id = ?
-        """,
-        (admin["id"], now, now, withdrawal_id)
-    )
-    
-    cur.execute(
-        "UPDATE users SET blocked_balance = blocked_balance - ? WHERE id = ?",
-        (withdrawal["amount"], withdrawal["user_id"])
-    )
-    
-    conn.commit()
-    conn.close()
-    return True
-
-def reject_withdrawal(withdrawal_id: int, admin_telegram_id: int) -> bool:
-    conn = get_db()
-    cur = conn.cursor()
-    now = utc_now_iso()
-    
-    withdrawal = cur.execute(
-        "SELECT * FROM withdrawals WHERE id = ?", (withdrawal_id,)
-    ).fetchone()
-    
-    if not withdrawal or withdrawal["status"] != "pending":
-        conn.close()
-        return False
-    
-    cur.execute(
-        """
-        UPDATE withdrawals SET 
-            status = 'cancelled',
-            cancelled_at = ?
-        WHERE id = ?
-        """,
-        (now, withdrawal_id)
-    )
-    
-    cur.execute(
-        "UPDATE users SET balance = balance + ?, blocked_balance = blocked_balance - ? WHERE id = ?",
-        (withdrawal["amount"], withdrawal["amount"], withdrawal["user_id"])
-    )
-    
-    conn.commit()
-    conn.close()
-    return True
-
-def create_news(
-    title_uz: str,
-    title_ru: str,
-    content_uz: str,
-    content_ru: str,
-    image_file_id: str = "",
-    created_by_telegram: int = 0
-) -> Optional[int]:
-    conn = get_db()
-    cur = conn.cursor()
-    now = utc_now_iso()
-    
-    cur.execute(
-        """
-        INSERT INTO news (
-            title_uz, title_ru, content_uz, content_ru,
-            image_file_id, created_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (title_uz, title_ru, content_uz, content_ru, image_file_id, created_by_telegram, now, now)
-    )
-    
-    news_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return news_id
-
-def get_active_news(limit: int = 20) -> List[dict]:
-    conn = get_db()
-    rows = conn.execute(
-        """
-        SELECT * FROM news 
-        WHERE is_active = 1 
-        ORDER BY is_pinned DESC, created_at DESC LIMIT ?
-        """,
-        (limit,)
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def get_all_news(limit: int = 50) -> List[dict]:
-    conn = get_db()
-    rows = conn.execute(
-        """
-        SELECT * FROM news 
-        ORDER BY created_at DESC LIMIT ?
-        """,
-        (limit,)
-    ).fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-def get_statistics() -> dict:
-    conn = get_db()
-    cur = conn.cursor()
-    
-    stats = {
-        "total_drivers": 0,
-        "active_drivers": 0,
-        "blocked_drivers": 0,
-        "registered_drivers": 0,
-        "total_orders": 0,
-        "today_orders": 0,
-        "pending_orders": 0,
-        "completed_orders": 0,
-        "total_earnings": 0,
-        "today_earnings": 0,
-        "pending_withdrawals": 0,
-        "total_withdrawals": 0,
-        "total_balance": 0,
-    }
-    
-    today = datetime.now().date().isoformat()
-    
-    # Drivers
-    row = cur.execute("SELECT COUNT(*) FROM users WHERE role = 'driver'").fetchone()
-    stats["total_drivers"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT COUNT(*) FROM users WHERE role = 'driver' AND is_registered = 1").fetchone()
-    stats["registered_drivers"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT COUNT(*) FROM users WHERE role = 'driver' AND is_active = 1 AND is_blocked = 0").fetchone()
-    stats["active_drivers"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT COUNT(*) FROM users WHERE role = 'driver' AND is_blocked = 1").fetchone()
-    stats["blocked_drivers"] = safe_int(row[0]) if row else 0
-    
-    # Orders
-    row = cur.execute("SELECT COUNT(*) FROM orders").fetchone()
-    stats["total_orders"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT COUNT(*) FROM orders WHERE date(created_at) = ?", (today,)).fetchone()
-    stats["today_orders"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT COUNT(*) FROM orders WHERE status = 'new'").fetchone()
-    stats["pending_orders"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT COUNT(*) FROM orders WHERE status = 'completed'").fetchone()
-    stats["completed_orders"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT SUM(net_amount) FROM orders WHERE status = 'completed'").fetchone()
-    stats["total_earnings"] = safe_float(row[0]) if row else 0
-    
-    row = cur.execute("SELECT SUM(net_amount) FROM orders WHERE status = 'completed' AND date(created_at) = ?", (today,)).fetchone()
-    stats["today_earnings"] = safe_float(row[0]) if row else 0
-    
-    # Withdrawals
-    row = cur.execute("SELECT COUNT(*) FROM withdrawals WHERE status = 'pending'").fetchone()
-    stats["pending_withdrawals"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT COUNT(*) FROM withdrawals WHERE status = 'completed'").fetchone()
-    stats["total_withdrawals"] = safe_int(row[0]) if row else 0
-    
-    row = cur.execute("SELECT SUM(balance) FROM users WHERE role = 'driver'").fetchone()
-    stats["total_balance"] = safe_float(row[0]) if row else 0
-    
-    conn.close()
-    return stats
-
 def add_driver_log(driver_id: int, action: str, details: str = "", ip: str = "") -> None:
     conn = get_db()
     now = utc_now_iso()
@@ -1216,18 +921,6 @@ class WithdrawStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     search_driver = State()
-    block_driver = State()
-    unblock_driver = State()
-    send_news_title = State()
-    send_news_content = State()
-    send_news_image = State()
-    send_news_confirm = State()
-    add_manager = State()
-    remove_manager = State()
-    view_logs = State()
-
-class SettingsStates(StatesGroup):
-    auto_withdraw_min = State()
 
 
 # ============================================================
@@ -1282,12 +975,6 @@ def cancel_keyboard(telegram_id: int) -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-def back_keyboard(telegram_id: int) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=t(telegram_id, "back"))]],
-        resize_keyboard=True
-    )
-
 def yes_no_keyboard(telegram_id: int) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -1307,15 +994,6 @@ def withdraw_type_keyboard(telegram_id: int) -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
-def settings_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=t(telegram_id, "settings_lang"), callback_data="settings:lang")],
-            [InlineKeyboardButton(text=t(telegram_id, "settings_notifications"), callback_data="settings:notifications")],
-            [InlineKeyboardButton(text=t(telegram_id, "settings_auto_withdraw"), callback_data="settings:auto_withdraw")],
-        ]
-    )
-
 def language_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1324,17 +1002,9 @@ def language_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
-def social_links_keyboard() -> Optional[InlineKeyboardMarkup]:
-    buttons = []
-    if CHANNEL_LINK:
-        buttons.append(InlineKeyboardButton(text="📢 Kanal", url=CHANNEL_LINK))
-    if DRIVER_GROUP_LINK:
-        buttons.append(InlineKeyboardButton(text="💬 Guruh", url=DRIVER_GROUP_LINK))
-    return InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
-
 
 # ============================================================
-# REGISTRATION HANDLERS
+# HANDLERS
 # ============================================================
 
 @driver_router.message(CommandStart())
@@ -1349,15 +1019,33 @@ async def cmd_start(message: Message) -> None:
         )
         return
     
-    # Show welcome with register button
+    # Show language selection first
     await message.answer(
-        t(message.from_user.id, "welcome"),
-        reply_markup=welcome_keyboard(message.from_user.id)
+        t(message.from_user.id, "choose_language"),
+        reply_markup=language_keyboard()
     )
+
+@driver_router.callback_query(F.data.startswith("lang:set:"))
+async def set_language_callback(callback: CallbackQuery) -> None:
+    lang = callback.data.split(":")[-1]
+    if lang in SUPPORTED_LANGS:
+        conn = get_db()
+        conn.execute(
+            "UPDATE users SET language = ?, updated_at = ? WHERE telegram_id = ?",
+            (lang, utc_now_iso(), callback.from_user.id)
+        )
+        conn.commit()
+        conn.close()
+        
+        await callback.message.delete()
+        await callback.message.answer(
+            t(lang, "welcome"),
+            reply_markup=welcome_keyboard(callback.from_user.id)
+        )
+    await callback.answer()
 
 @driver_router.message(F.text.in_([TEXTS['uz']['register_btn'], TEXTS['ru']['register_btn']]))
 async def start_registration(message: Message, state: FSMContext) -> None:
-    # Check if already registered
     user = get_user_by_telegram(message.from_user.id)
     if user and user.get("is_registered", 0) == 1:
         await message.answer(
@@ -1464,7 +1152,6 @@ async def register_car_number(message: Message, state: FSMContext) -> None:
     await state.update_data(car_number=car_number)
     data = await state.get_data()
     
-    # Complete registration
     position = complete_registration(
         message.from_user.id,
         data.get("full_name", ""),
@@ -1477,7 +1164,6 @@ async def register_car_number(message: Message, state: FSMContext) -> None:
     await state.clear()
     
     if position:
-        # Log registration
         add_driver_log(message.from_user.id, "register", f"Registered with position {position}")
         
         await message.answer(
@@ -1485,7 +1171,6 @@ async def register_car_number(message: Message, state: FSMContext) -> None:
             reply_markup=user_main_menu(message.from_user.id)
         )
         
-        # Notify admins
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(
@@ -1508,820 +1193,6 @@ async def register_car_number(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# DRIVER HANDLERS
-# ============================================================
-
-@driver_router.message(Command("menu"))
-async def cmd_menu(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer(
-            "❗ Iltimos, avval ro'yxatdan o'ting: /start",
-            reply_markup=welcome_keyboard(message.from_user.id)
-        )
-        return
-    
-    await message.answer(
-        t(message.from_user.id, "main_menu").format(
-            name=user.get("full_name", "Haydovchi"),
-            position=user.get("position", "N/A")
-        ),
-        reply_markup=user_main_menu(message.from_user.id)
-    )
-
-# Balance
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_balance'], TEXTS['ru']['menu_balance']]))
-async def show_balance(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    if user.get("is_blocked", 0) == 1:
-        await message.answer("🚫 Siz bloklangansiz! Admin bilan bog'laning.")
-        return
-    
-    text = (
-        f"{t(message.from_user.id, 'balance_title')}\n\n"
-        f"{t(message.from_user.id, 'balance_current')}: <b>{fmt_sum(user['balance'])}</b>\n"
-        f"{t(message.from_user.id, 'balance_blocked')}: <b>{fmt_sum(user['blocked_balance'])}</b>\n"
-        f"{t(message.from_user.id, 'balance_available')}: <b>{fmt_sum(user['balance'] - user['blocked_balance'])}</b>"
-    )
-    
-    await message.answer(text, reply_markup=user_main_menu(message.from_user.id))
-
-# Today Orders
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_today_orders'], TEXTS['ru']['menu_today_orders']]))
-async def show_today_orders(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    if user.get("is_blocked", 0) == 1:
-        await message.answer("🚫 Siz bloklangansiz! Admin bilan bog'laning.")
-        return
-    
-    orders = get_today_orders(message.from_user.id)
-    stats = get_driver_stats(message.from_user.id)
-    
-    if not orders:
-        await message.answer(
-            f"{t(message.from_user.id, 'orders_today_title')}\n\n"
-            f"{t(message.from_user.id, 'orders_today_empty')}",
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-        return
-    
-    text = f"{t(message.from_user.id, 'orders_today_title')}\n\n"
-    text += f"{t(message.from_user.id, 'orders_total')}: <b>{len(orders)}</b>\n"
-    text += f"{t(message.from_user.id, 'orders_earnings')}: <b>{fmt_sum(stats['today_sum'])}</b>\n\n"
-    
-    for order in orders[:10]:
-        status = t(message.from_user.id, f"status_{order['status']}")
-        text += (
-            f"🔹 {t(message.from_user.id, 'order_id')}: #{order['id']}\n"
-            f"   {t(message.from_user.id, 'order_amount')}: {fmt_sum(order['net_amount'])}\n"
-            f"   {t(message.from_user.id, 'order_status')}: {status}\n"
-            f"   {t(message.from_user.id, 'order_time')}: {order['created_at'][:16]}\n\n"
-        )
-    
-    await message.answer(text, reply_markup=user_main_menu(message.from_user.id))
-
-# Withdraw
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_withdraw'], TEXTS['ru']['menu_withdraw']]))
-async def start_withdraw(message: Message, state: FSMContext) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    if user.get("is_blocked", 0) == 1:
-        await message.answer("🚫 Siz bloklangansiz! Admin bilan bog'laning.")
-        return
-    
-    available = user['balance'] - user['blocked_balance']
-    if available < MIN_WITHDRAWAL:
-        await message.answer(
-            f"{t(message.from_user.id, 'withdraw_title')}\n\n"
-            f"{t(message.from_user.id, 'withdraw_available')}: <b>{fmt_sum(available)}</b>\n"
-            f"{t(message.from_user.id, 'withdraw_min')}: <b>{fmt_sum(MIN_WITHDRAWAL)}</b>\n"
-            f"{t(message.from_user.id, 'withdraw_commission')}: <b>{COMMISSION_PERCENT}%</b>\n\n"
-            f"{t(message.from_user.id, 'withdraw_balance_error')}",
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-        return
-    
-    await state.set_state(WithdrawStates.amount)
-    await message.answer(
-        f"{t(message.from_user.id, 'withdraw_title')}\n\n"
-        f"{t(message.from_user.id, 'withdraw_available')}: <b>{fmt_sum(available)}</b>\n"
-        f"{t(message.from_user.id, 'withdraw_min')}: <b>{fmt_sum(MIN_WITHDRAWAL)}</b>\n"
-        f"{t(message.from_user.id, 'withdraw_commission')}: <b>{COMMISSION_PERCENT}%</b>\n\n"
-        f"{t(message.from_user.id, 'withdraw_amount_ask')}",
-        reply_markup=cancel_keyboard(message.from_user.id)
-    )
-
-@driver_router.message(WithdrawStates.amount)
-async def withdraw_amount(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
-        await state.clear()
-        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
-        return
-    
-    try:
-        amount = float(message.text.strip().replace(" ", ""))
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer(t(message.from_user.id, "invalid_input"))
-        return
-    
-    user = get_user_by_telegram(message.from_user.id)
-    available = user['balance'] - user['blocked_balance']
-    
-    if amount < MIN_WITHDRAWAL:
-        await message.answer(t(message.from_user.id, "withdraw_min_error").format(min=fmt_sum(MIN_WITHDRAWAL)))
-        return
-    
-    if amount > available:
-        await message.answer(t(message.from_user.id, "withdraw_balance_error"))
-        return
-    
-    await state.update_data(amount=amount)
-    await state.set_state(WithdrawStates.payment_type)
-    await message.answer(
-        f"{t(message.from_user.id, 'withdraw_type_ask')}",
-        reply_markup=withdraw_type_keyboard(message.from_user.id)
-    )
-
-@driver_router.message(WithdrawStates.payment_type)
-async def withdraw_payment_type(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
-        await state.clear()
-        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
-        return
-    
-    payment_type = message.text
-    valid_types = ["💳 Kartaga", "💵 Naqd", "🏦 BRB 24/7"]
-    if payment_type not in valid_types:
-        await message.answer(t(message.from_user.id, "invalid_input"))
-        return
-    
-    await state.update_data(payment_type=payment_type)
-    
-    if payment_type == "💳 Kartaga":
-        await state.set_state(WithdrawStates.card_number)
-        await message.answer(
-            t(message.from_user.id, "withdraw_card_ask"),
-            reply_markup=cancel_keyboard(message.from_user.id)
-        )
-    elif payment_type == "💵 Naqd":
-        await state.set_state(WithdrawStates.phone_number)
-        await message.answer(
-            t(message.from_user.id, "withdraw_phone_ask"),
-            reply_markup=cancel_keyboard(message.from_user.id)
-        )
-    else:  # BRB 24/7
-        await state.set_state(WithdrawStates.confirm)
-        data = await state.get_data()
-        amount = data.get("amount", 0)
-        commission = amount * (COMMISSION_PERCENT / 100)
-        net_amount = amount - commission
-        
-        await message.answer(
-            f"{t(message.from_user.id, 'withdraw_title')}\n\n"
-            f"💳 BRB 24/7 orqali yechish\n"
-            f"💰 Summa: {fmt_sum(amount)}\n"
-            f"📊 Komissiya: {fmt_sum(commission)}\n"
-            f"💵 Chiqim: {fmt_sum(net_amount)}\n\n"
-            f"{t(message.from_user.id, 'withdraw_confirm')}",
-            reply_markup=yes_no_keyboard(message.from_user.id)
-        )
-
-@driver_router.message(WithdrawStates.card_number)
-async def withdraw_card_number(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
-        await state.clear()
-        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
-        return
-    
-    card = normalize_card(message.text)
-    if not is_valid_card(card):
-        await message.answer(t(message.from_user.id, "invalid_card"))
-        return
-    
-    await state.update_data(card_number=card)
-    await state.set_state(WithdrawStates.confirm)
-    data = await state.get_data()
-    amount = data.get("amount", 0)
-    commission = amount * (COMMISSION_PERCENT / 100)
-    net_amount = amount - commission
-    
-    await message.answer(
-        f"{t(message.from_user.id, 'withdraw_title')}\n\n"
-        f"💳 Kartaga yechish\n"
-        f"💰 Summa: {fmt_sum(amount)}\n"
-        f"📊 Komissiya: {fmt_sum(commission)}\n"
-        f"💵 Chiqim: {fmt_sum(net_amount)}\n"
-        f"💳 Karta: {card}\n\n"
-        f"{t(message.from_user.id, 'withdraw_confirm')}",
-        reply_markup=yes_no_keyboard(message.from_user.id)
-    )
-
-@driver_router.message(WithdrawStates.phone_number)
-async def withdraw_phone_number(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
-        await state.clear()
-        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
-        return
-    
-    phone = normalize_phone(message.text)
-    if not is_valid_phone(phone):
-        await message.answer(t(message.from_user.id, "invalid_phone"))
-        return
-    
-    await state.update_data(phone_number=phone)
-    await state.set_state(WithdrawStates.confirm)
-    data = await state.get_data()
-    amount = data.get("amount", 0)
-    commission = amount * (COMMISSION_PERCENT / 100)
-    net_amount = amount - commission
-    
-    await message.answer(
-        f"{t(message.from_user.id, 'withdraw_title')}\n\n"
-        f"💵 Naqd yechish\n"
-        f"💰 Summa: {fmt_sum(amount)}\n"
-        f"📊 Komissiya: {fmt_sum(commission)}\n"
-        f"💵 Chiqim: {fmt_sum(net_amount)}\n"
-        f"📱 Telefon: {phone}\n\n"
-        f"{t(message.from_user.id, 'withdraw_confirm')}",
-        reply_markup=yes_no_keyboard(message.from_user.id)
-    )
-
-@driver_router.message(WithdrawStates.confirm)
-async def withdraw_confirm(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "no") or message.text == t(message.from_user.id, "cancel"):
-        await state.clear()
-        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
-        return
-    
-    if message.text != t(message.from_user.id, "yes"):
-        await message.answer(t(message.from_user.id, "invalid_input"))
-        return
-    
-    data = await state.get_data()
-    amount = data.get("amount", 0)
-    payment_type = data.get("payment_type", "")
-    card_number = data.get("card_number", "")
-    phone_number = data.get("phone_number", "")
-    
-    # Map payment type
-    type_map = {
-        "💳 Kartaga": "card",
-        "💵 Naqd": "cash",
-        "🏦 BRB 24/7": "brb",
-    }
-    payment_type_key = type_map.get(payment_type, "card")
-    
-    withdrawal_id = create_withdrawal(
-        message.from_user.id,
-        amount,
-        payment_type_key,
-        card_number,
-        phone_number
-    )
-    
-    await state.clear()
-    
-    if withdrawal_id:
-        await message.answer(
-            f"{t(message.from_user.id, 'withdraw_success')}\n\n"
-            f"💸 So'rov raqami: #{withdrawal_id}\n"
-            f"💰 Summa: {fmt_sum(amount)}\n"
-            f"⏳ Holat: {t(message.from_user.id, 'withdraw_pending')}",
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-        
-        # Notify admins
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"💸 Yangi pul yechish so'rovi!\n\n"
-                    f"👤 Haydovchi: {message.from_user.full_name} (@{message.from_user.username})\n"
-                    f"🆔 ID: {message.from_user.id}\n"
-                    f"💰 Summa: {fmt_sum(amount)}\n"
-                    f"💳 Tur: {payment_type}\n"
-                    f"🆔 So'rov: #{withdrawal_id}"
-                )
-            except Exception:
-                pass
-    else:
-        await message.answer(
-            t(message.from_user.id, "withdraw_fail"),
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-
-# History
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_history'], TEXTS['ru']['menu_history']]))
-async def show_history(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    transactions = get_transactions(message.from_user.id, 20)
-    withdrawals = get_withdrawals(message.from_user.id, 20)
-    
-    if not transactions and not withdrawals:
-        await message.answer(
-            "📜 <b>To'lovlar tarixi</b>\n\n"
-            "Hozircha hech qanday to'lov yo'q",
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-        return
-    
-    text = "📜 <b>To'lovlar tarixi</b>\n\n"
-    
-    if transactions:
-        text += "💰 <b>To'lovlar:</b>\n"
-        for txn in transactions[:10]:
-            status = t(message.from_user.id, f"payment_{txn['status']}")
-            text += f"  • {fmt_sum(txn['amount'])} | {status} | {txn['created_at'][:16]}\n"
-    
-    if withdrawals:
-        text += "\n💸 <b>Pul yechishlar:</b>\n"
-        for w in withdrawals[:10]:
-            status = t(message.from_user.id, f"withdraw_{w['status']}")
-            text += f"  • {fmt_sum(w['amount'])} | {status} | {w['created_at'][:16]}\n"
-    
-    await message.answer(text, reply_markup=user_main_menu(message.from_user.id))
-
-# Profile
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_profile'], TEXTS['ru']['menu_profile']]))
-async def show_profile(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    stats = get_driver_stats(message.from_user.id)
-    status_text = t(message.from_user.id, "profile_status_active") if not user.get("is_blocked") else t(message.from_user.id, "profile_status_blocked")
-    
-    text = (
-        f"{t(message.from_user.id, 'profile_title')}\n\n"
-        f"{t(message.from_user.id, 'profile_position')}: <code>{user.get('position', 'N/A')}</code>\n"
-        f"{t(message.from_user.id, 'profile_id')}: <code>{user['telegram_id']}</code>\n"
-        f"{t(message.from_user.id, 'profile_name')}: {user['full_name'] or '—'}\n"
-        f"{t(message.from_user.id, 'profile_phone')}: {user['phone'] or '—'}\n"
-        f"{t(message.from_user.id, 'profile_card')}: {user['card_number'] or '—'}\n"
-        f"{t(message.from_user.id, 'profile_car')}: {user['car_model'] or '—'}\n"
-        f"{t(message.from_user.id, 'profile_car_number')}: {user['car_number'] or '—'}\n"
-        f"{t(message.from_user.id, 'profile_status')}: {status_text}\n"
-        f"\n{t(message.from_user.id, 'profile_rating')}: ⭐ {user['rating']:.1f}\n"
-        f"{t(message.from_user.id, 'profile_orders')}: {stats['total_count']}\n"
-        f"{t(message.from_user.id, 'profile_earnings')}: {fmt_sum(stats['total_sum'])}\n"
-        f"{t(message.from_user.id, 'profile_joined')}: {user['created_at'][:16]}"
-    )
-    
-    await message.answer(text, reply_markup=user_main_menu(message.from_user.id))
-
-# News
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_news'], TEXTS['ru']['menu_news']]))
-async def show_news(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    news_list = get_active_news(10)
-    
-    if not news_list:
-        await message.answer(
-            f"{t(message.from_user.id, 'news_title')}\n\n"
-            f"{t(message.from_user.id, 'news_empty')}",
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-        return
-    
-    text = f"{t(message.from_user.id, 'news_title')}\n\n"
-    for news in news_list:
-        lang = get_user_lang(message.from_user.id)
-        title = news.get(f"title_{lang}") or news.get("title_uz") or "Yangilik"
-        content = news.get(f"content_{lang}") or news.get("content_uz") or ""
-        text += f"<b>{title}</b>\n"
-        if content:
-            text += f"{content[:200]}...\n"
-        text += f"{t(message.from_user.id, 'news_date')}: {news['created_at'][:10]}\n"
-        text += f"{t(message.from_user.id, 'news_views')}: {news['views_count']}\n"
-        text += "---\n\n"
-    
-    await message.answer(text, reply_markup=user_main_menu(message.from_user.id))
-
-# Group
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_group'], TEXTS['ru']['menu_group']]))
-async def show_group(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    if DRIVER_GROUP_LINK:
-        await message.answer(
-            f"💬 <b>Haydovchilar guruhi</b>\n\n"
-            f"Guruhga quyidagi havola orqali qo'shiling:\n{DRIVER_GROUP_LINK}",
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-    else:
-        await message.answer(
-            "💬 Guruh havolasi hozircha mavjud emas.\n"
-            "Admin bilan bog'laning.",
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-
-# Support
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_support'], TEXTS['ru']['menu_support']]))
-async def show_support(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    text = (
-        f"{t(message.from_user.id, 'support_title')}\n\n"
-        f"{t(message.from_user.id, 'support_text')}\n\n"
-        f"{t(message.from_user.id, 'support_phone')}: {SUPPORT_PHONE}\n"
-        f"{t(message.from_user.id, 'support_tg')}: {SUPPORT_TG}"
-    )
-    
-    if CHANNEL_LINK:
-        text += f"\n{t(message.from_user.id, 'support_channel')}: {CHANNEL_LINK}"
-    
-    if DRIVER_GROUP_LINK:
-        text += f"\n{t(message.from_user.id, 'support_group')}: {DRIVER_GROUP_LINK}"
-    
-    await message.answer(text, reply_markup=user_main_menu(message.from_user.id))
-
-# Settings
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_settings'], TEXTS['ru']['menu_settings']]))
-async def show_settings(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer("❗ Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=welcome_keyboard(message.from_user.id))
-        return
-    
-    await message.answer(
-        f"{t(message.from_user.id, 'settings_title')}",
-        reply_markup=settings_keyboard(message.from_user.id)
-    )
-
-# Back button
-@driver_router.message(F.text.in_([TEXTS['uz']['menu_back'], TEXTS['ru']['menu_back']]))
-async def back_to_main(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if user and user.get("is_registered", 0) == 1:
-        await message.answer(
-            t(message.from_user.id, "main_menu").format(
-                name=user.get("full_name", "Haydovchi"),
-                position=user.get("position", "N/A")
-            ),
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-    else:
-        await message.answer(
-            "❗ Iltimos, avval ro'yxatdan o'ting: /start",
-            reply_markup=welcome_keyboard(message.from_user.id)
-        )
-
-
-# ============================================================
-# ADMIN HANDLERS
-# ============================================================
-
-@admin_router.message(F.text.in_([TEXTS['uz']['menu_admin'], TEXTS['ru']['menu_admin']]))
-async def admin_menu_open(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer(t(message.from_user.id, "not_admin"))
-        return
-    await message.answer(t(message.from_user.id, "admin_title"), reply_markup=admin_main_menu(message.from_user.id))
-
-@admin_router.message(F.text.in_([TEXTS['uz']['admin_drivers'], TEXTS['ru']['admin_drivers']]))
-async def admin_drivers_handler(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer(t(message.from_user.id, "not_admin"))
-        return
-    
-    drivers = get_all_drivers(50)
-    text = f"👥 <b>Haydovchilar ({len(drivers)} ta ro'yxatdan o'tgan)</b>\n\n"
-    
-    for driver in drivers[:20]:
-        text += (
-            f"POSITION: <code>{driver.get('position', 'N/A')}</code>\n"
-            f"ID: <code>{driver['telegram_id']}</code>\n"
-            f"Ism: {driver['full_name'] or '—'}\n"
-            f"Mashina: {driver['car_model'] or '—'} ({driver['car_number'] or '—'})\n"
-            f"Balans: {fmt_sum(driver['balance'])}\n"
-            f"Holat: {'🔴 Bloklangan' if driver['is_blocked'] else '🟢 Faol'}\n"
-            f"---\n"
-        )
-    
-    await message.answer(text, reply_markup=admin_main_menu(message.from_user.id))
-
-@admin_router.message(F.text.in_([TEXTS['uz']['admin_search'], TEXTS['ru']['admin_search']]))
-async def admin_search_start(message: Message, state: FSMContext) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer(t(message.from_user.id, "not_admin"))
-        return
-    
-    await state.set_state(AdminStates.search_driver)
-    await message.answer(
-        "🔎 <b>Haydovchi qidirish</b>\n\n"
-        "Qidirish uchun: ism, telefon, POSITION, yoki telegram ID kiriting:",
-        reply_markup=cancel_keyboard(message.from_user.id)
-    )
-
-@admin_router.message(AdminStates.search_driver)
-async def admin_search_handler(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
-        await state.clear()
-        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=admin_main_menu(message.from_user.id))
-        return
-    
-    query = message.text.strip()
-    drivers = search_drivers(query)
-    
-    if not drivers:
-        await message.answer("❌ Hech qanday haydovchi topilmadi")
-        return
-    
-    text = f"🔎 <b>Qidiruv natijalari ({len(drivers)})</b>\n\n"
-    
-    for driver in drivers[:10]:
-        text += (
-            f"POSITION: <code>{driver.get('position', 'N/A')}</code>\n"
-            f"ID: <code>{driver['telegram_id']}</code>\n"
-            f"Ism: {driver['full_name'] or '—'}\n"
-            f"Telefon: {driver['phone'] or '—'}\n"
-            f"Mashina: {driver['car_model'] or '—'}\n"
-            f"Balans: {fmt_sum(driver['balance'])}\n"
-            f"Holat: {'🔴 Bloklangan' if driver['is_blocked'] else '🟢 Faol'}\n"
-            f"---\n"
-        )
-    
-    await message.answer(text, reply_markup=admin_main_menu(message.from_user.id))
-    await state.clear()
-
-@admin_router.message(F.text.in_([TEXTS['uz']['admin_balances'], TEXTS['ru']['admin_balances']]))
-async def admin_balances_handler(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer(t(message.from_user.id, "not_admin"))
-        return
-    
-    drivers = get_all_drivers(30)
-    text = f"💰 <b>Balanslar ({len(drivers)})</b>\n\n"
-    
-    sorted_drivers = sorted(drivers, key=lambda x: x['balance'], reverse=True)
-    for driver in sorted_drivers[:15]:
-        text += (
-            f"{driver['full_name'] or 'No name'}\n"
-            f"POSITION: <code>{driver.get('position', 'N/A')}</code>\n"
-            f"Balans: {fmt_sum(driver['balance'])}\n"
-            f"---\n"
-        )
-    
-    await message.answer(text, reply_markup=admin_main_menu(message.from_user.id))
-
-@admin_router.message(F.text.in_([TEXTS['uz']['admin_withdrawals'], TEXTS['ru']['admin_withdrawals']]))
-async def admin_withdrawals_handler(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer(t(message.from_user.id, "not_admin"))
-        return
-    
-    pending = get_pending_withdrawals(20)
-    
-    if not pending:
-        await message.answer(
-            "💸 <b>Pul yechish so'rovlari</b>\n\n"
-            "Hozircha kutilayotgan so'rovlar yo'q ✅",
-            reply_markup=admin_main_menu(message.from_user.id)
-        )
-        return
-    
-    text = f"💸 <b>Pul yechish so'rovlari ({len(pending)})</b>\n\n"
-    
-    for w in pending:
-        text += (
-            f"🆔 So'rov: #{w['id']}\n"
-            f"👤 Haydovchi: {w['full_name'] or '—'} (@{w['username'] or 'No username'})\n"
-            f"💰 Summa: {fmt_sum(w['amount'])}\n"
-            f"💳 Tur: {w['payment_type']}\n"
-            f"📱 Telefon: {w['phone_number'] or '—'}\n"
-            f"💳 Karta: {w['card_number'] or '—'}\n"
-            f"⏳ Vaqt: {w['created_at'][:16]}\n"
-            f"---\n"
-        )
-    
-    await message.answer(text, reply_markup=admin_main_menu(message.from_user.id))
-
-@admin_router.message(F.text.in_([TEXTS['uz']['admin_stats'], TEXTS['ru']['admin_stats']]))
-async def admin_stats_handler(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer(t(message.from_user.id, "not_admin"))
-        return
-    
-    stats = get_statistics()
-    
-    text = (
-        f"📊 <b>Statistika</b>\n\n"
-        f"👥 <b>Haydovchilar:</b>\n"
-        f"  • Jami: {stats['total_drivers']}\n"
-        f"  • Ro'yxatdan o'tgan: {stats['registered_drivers']}\n"
-        f"  • Faol: {stats['active_drivers']}\n"
-        f"  • Bloklangan: {stats['blocked_drivers']}\n\n"
-        f"📦 <b>Buyurtmalar:</b>\n"
-        f"  • Jami: {stats['total_orders']}\n"
-        f"  • Bugun: {stats['today_orders']}\n"
-        f"  • Bajarilgan: {stats['completed_orders']}\n"
-        f"  • Kutilayotgan: {stats['pending_orders']}\n\n"
-        f"💰 <b>Moliya:</b>\n"
-        f"  • Jami daromad: {fmt_sum(stats['total_earnings'])}\n"
-        f"  • Bugungi daromad: {fmt_sum(stats['today_earnings'])}\n"
-        f"  • Jami balans: {fmt_sum(stats['total_balance'])}\n"
-        f"  • Kutilayotgan yechishlar: {stats['pending_withdrawals']}\n"
-        f"  • Bajarilgan yechishlar: {stats['total_withdrawals']}"
-    )
-    
-    await message.answer(text, reply_markup=admin_main_menu(message.from_user.id))
-
-@admin_router.message(F.text.in_([TEXTS['uz']['admin_back'], TEXTS['ru']['admin_back']]))
-async def admin_back_handler(message: Message) -> None:
-    if not is_admin(message.from_user.id):
-        await message.answer(t(message.from_user.id, "not_admin"))
-        return
-    
-    user = get_user_by_telegram(message.from_user.id)
-    if user and user.get("is_registered", 0) == 1:
-        await message.answer(
-            t(message.from_user.id, "main_menu").format(
-                name=user.get("full_name", "Haydovchi"),
-                position=user.get("position", "N/A")
-            ),
-            reply_markup=user_main_menu(message.from_user.id)
-        )
-    else:
-        await message.answer(
-            "❗ Iltimos, avval ro'yxatdan o'ting: /start",
-            reply_markup=welcome_keyboard(message.from_user.id)
-        )
-
-
-# ============================================================
-# LANGUAGE HANDLERS
-# ============================================================
-
-@driver_router.callback_query(F.data.startswith("lang:set:"))
-async def set_language_callback(callback: CallbackQuery) -> None:
-    lang = callback.data.split(":")[-1]
-    if lang in SUPPORTED_LANGS:
-        conn = get_db()
-        conn.execute(
-            "UPDATE users SET language = ?, updated_at = ? WHERE telegram_id = ?",
-            (lang, utc_now_iso(), callback.from_user.id)
-        )
-        conn.commit()
-        conn.close()
-        
-        await callback.message.answer(
-            t(lang, "lang_updated"),
-            reply_markup=user_main_menu(callback.from_user.id)
-        )
-    await callback.answer()
-
-@driver_router.callback_query(F.data.startswith("settings:"))
-async def settings_callback(callback: CallbackQuery) -> None:
-    action = callback.data.split(":")[-1]
-    
-    if action == "lang":
-        await callback.message.answer(
-            "🌐 Tilni tanlang / Выберите язык:",
-            reply_markup=language_keyboard()
-        )
-    elif action == "notifications":
-        # Toggle notifications
-        conn = get_db()
-        current = conn.execute(
-            "SELECT notifications_enabled FROM users WHERE telegram_id = ?",
-            (callback.from_user.id,)
-        ).fetchone()
-        
-        if current:
-            new_value = 1 if current["notifications_enabled"] == 0 else 0
-            conn.execute(
-                "UPDATE users SET notifications_enabled = ? WHERE telegram_id = ?",
-                (new_value, callback.from_user.id)
-            )
-            conn.commit()
-            status = "✅ Yoqilgan" if new_value else "❌ O'chirilgan"
-            await callback.message.answer(
-                f"🔔 Bildirishnomalar: {status}\n"
-                f"{t(callback.from_user.id, 'settings_saved')}"
-            )
-        conn.close()
-    elif action == "auto_withdraw":
-        # Toggle auto withdrawal
-        conn = get_db()
-        current = conn.execute(
-            "SELECT auto_withdrawal, auto_withdrawal_min FROM users WHERE telegram_id = ?",
-            (callback.from_user.id,)
-        ).fetchone()
-        
-        if current:
-            new_value = 1 if current["auto_withdrawal"] == 0 else 0
-            conn.execute(
-                "UPDATE users SET auto_withdrawal = ? WHERE telegram_id = ?",
-                (new_value, callback.from_user.id)
-            )
-            conn.commit()
-            status = "✅ Yoqilgan" if new_value else "❌ O'chirilgan"
-            min_amount = fmt_sum(current["auto_withdrawal_min"])
-            await callback.message.answer(
-                f"💰 Avtomatik pul yechish: {status}\n"
-                f"Chegara: {min_amount}\n\n"
-                f"{t(callback.from_user.id, 'settings_saved')}"
-            )
-        conn.close()
-    
-    await callback.answer()
-
-
-# ============================================================
-# FALLBACK HANDLER
-# ============================================================
-
-@driver_router.message()
-async def fallback_handler(message: Message) -> None:
-    user = get_user_by_telegram(message.from_user.id)
-    if not user or user.get("is_registered", 0) != 1:
-        await message.answer(
-            "❗ Iltimos, avval ro'yxatdan o'ting: /start",
-            reply_markup=welcome_keyboard(message.from_user.id)
-        )
-        return
-    
-    await message.answer(
-        "Iltimos, menyudan biror tugmani bosing.",
-        reply_markup=user_main_menu(message.from_user.id)
-    )
-
-
-# ============================================================
-# WEB ROUTES
-# ============================================================
-
-@web_router.get("/")
-async def index_page(request: web.Request) -> web.Response:
-    return web.Response(
-        text=f"""
-        <html>
-        <head><title>{BOT_NAME}</title></head>
-        <body style="font-family:Arial;text-align:center;padding:50px;background:linear-gradient(135deg,#1a1a2e,#16213e);color:white;">
-            <h1>🚕 {BOT_NAME}</h1>
-            <p>Haydovchilar uchun aqlli tizim</p>
-            <p>Bot: <a href="https://t.me/lochin_taxi_bot" style="color:#4fc3f7;">@lochin_taxi_bot</a></p>
-            <p style="margin-top:30px;color:#888;">v2.0.0 | 24/7</p>
-        </body>
-        </html>
-        """,
-        content_type="text/html"
-    )
-
-@web_router.get("/health")
-async def health_route(request: web.Request) -> web.Response:
-    return web.json_response({"status": "ok", "service": BOT_NAME})
-
-@web_router.post("/api/webhook/order")
-async def order_webhook(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        logger.info(f"Order webhook received: {data}")
-        return web.json_response({"status": "ok"})
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return web.json_response({"status": "error"}, status=500)
-
-@web_router.post("/api/webhook/payment")
-async def payment_webhook(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        logger.info(f"Payment webhook received: {data}")
-        return web.json_response({"status": "ok"})
-    except Exception as e:
-        logger.error(f"Payment webhook error: {e}")
-        return web.json_response({"status": "error"}, status=500)
-
-
-# ============================================================
 # MAIN
 # ============================================================
 
@@ -2330,13 +1201,10 @@ def register_routers() -> None:
     dp.include_router(admin_router)
 
 async def main() -> None:
-    # Initialize DB
     init_db()
-    
-    # Register routers
     register_routers()
     
-    # Start web server
+    # Web server
     app = web.Application()
     app.add_routes(web_router)
     runner = web.AppRunner(app)
@@ -2348,7 +1216,6 @@ async def main() -> None:
     logger.info(f"✅ Bot running on port {PORT}")
     logger.info(f"✅ Web server started")
     
-    # Start bot polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
