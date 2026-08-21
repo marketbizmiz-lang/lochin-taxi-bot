@@ -63,15 +63,6 @@ DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "").strip()
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998712345678").strip()
 SUPPORT_TG = os.getenv("SUPPORT_TG", "@lochin_support").strip()
 
-# Yandex Fleet
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
-YANDEX_FLEET_URL = os.getenv("YANDEX_FLEET_URL", "https://fleet-api.yandex.ru/v1")
-
-# BRB 24/7 API
-BRB_API_URL = os.getenv("BRB_API_URL", "https://api.brb.uz/v1").strip()
-BRB_API_KEY = os.getenv("BRB_API_KEY", "").strip()
-BRB_MERCHANT_ID = os.getenv("BRB_MERCHANT_ID", "").strip()
-
 # Settings
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "50000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "2.5"))
@@ -178,8 +169,6 @@ TEXTS: dict[str, dict[str, str]] = {
         "orders_today_empty": "Bugun hech qanday buyurtma yo'q 📭",
         "orders_total": "Jami buyurtmalar",
         "orders_earnings": "Daromad",
-        "orders_completed": "Bajarilgan",
-        "orders_cancelled": "Bekor qilingan",
         "order_id": "Buyurtma raqami",
         "order_time": "Vaqt",
         "order_amount": "Summa",
@@ -1190,6 +1179,51 @@ async def register_car_number(message: Message, state: FSMContext) -> None:
             "Iltimos, qaytadan /start bosing.",
             reply_markup=welcome_keyboard(message.from_user.id)
         )
+
+
+# ============================================================
+# WEB ROUTES - БУ ЕРГА ЭЪТИБОР БЕРИНГ!
+# ============================================================
+
+@web_router.get("/")
+async def index_page(request: web.Request) -> web.Response:
+    return web.Response(
+        text=f"""
+        <html>
+        <head><title>{BOT_NAME}</title></head>
+        <body style="font-family:Arial;text-align:center;padding:50px;background:linear-gradient(135deg,#1a1a2e,#16213e);color:white;">
+            <h1>🚕 {BOT_NAME}</h1>
+            <p>Haydovchilar uchun aqlli tizim</p>
+            <p style="margin-top:30px;color:#888;">v2.0.0 | 24/7</p>
+        </body>
+        </html>
+        """,
+        content_type="text/html"
+    )
+
+@web_router.get("/health")
+async def health_route(request: web.Request) -> web.Response:
+    return web.json_response({"status": "ok", "service": BOT_NAME})
+
+@web_router.post("/api/webhook/order")
+async def order_webhook(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        logger.info(f"Order webhook received: {data}")
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return web.json_response({"status": "error"}, status=500)
+
+@web_router.post("/api/webhook/payment")
+async def payment_webhook(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        logger.info(f"Payment webhook received: {data}")
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Payment webhook error: {e}")
+        return web.json_response({"status": "error"}, status=500)
 
 
 # ============================================================
