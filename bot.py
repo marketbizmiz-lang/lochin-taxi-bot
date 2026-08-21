@@ -538,7 +538,8 @@ async def show_profile(message: Message):
     if not user or user["is_registered"] == 0:
         await message.answer("Avval ro'yxatdan o'ting. /start bosing.")
         return
-    await message.answer(f"👤 <b>Profil</b>\n\nIsm: {user['full_name']}\nTelefon: {user['phone']}\nMashina: {user['car_model']} | {user['car_number']}\nPOSITION: <code>{user['position']}</code>\nYandex ID: <code>{user.get('yandex_driver_id') or 'Yo\\'q'}</code>", reply_markup=user_main_menu(message.from_user.id))
+    # ТУЗАТИЛГАН ҚАТОР: 'Yo\'q' ўрнига 'Mavjud emas' ишлатилди
+    await message.answer(f"👤 <b>Profil</b>\n\nIsm: {user['full_name']}\nTelefon: {user['phone']}\nMashina: {user['car_model']} | {user['car_number']}\nPOSITION: <code>{user['position']}</code>\nYandex ID: <code>{user.get('yandex_driver_id') or 'Mavjud emas'}</code>", reply_markup=user_main_menu(message.from_user.id))
 
 @driver_router.message(F.text == "💬 Haydovchilar guruhi")
 async def show_group(message: Message):
