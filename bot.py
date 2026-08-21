@@ -78,7 +78,7 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Routers
+# Routers (Расмдагидек, иккала Router ҳам ишлатилади)
 driver_router = Router()
 admin_router = Router()
 web_router = web.RouteTableDef()
@@ -90,7 +90,6 @@ web_router = web.RouteTableDef()
 
 TEXTS: dict[str, dict[str, str]] = {
     "uz": {
-        # Welcome & Registration
         "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n"
                    f"{BOT_NAME} bilan hamkorlik qilganingizdan juda minnatdormiz! 🤝\n\n"
                    f"🚕 Tizimga kirish uchun ro'yxatdan o'ting.",
@@ -250,7 +249,6 @@ TEXTS: dict[str, dict[str, str]] = {
         "payment_completed": "✅ To'langan",
     },
     "ru": {
-        # Welcome & Registration
         "welcome": f"🕌 <b>Ассаламу алейкум!</b>\n\n"
                    f"Мы очень благодарны вам за сотрудничество с {BOT_NAME}! 🤝\n\n"
                    f"🚕 Для входа в систему пройдите регистрацию.",
@@ -993,14 +991,13 @@ def language_keyboard() -> InlineKeyboardMarkup:
 
 
 # ============================================================
-# HANDLERS
+# HANDLERS (МУҲИМ ҚИСМ: Барча тугмалар ишлаши учун)
 # ============================================================
 
 @driver_router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     user = upsert_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     
-    # Check if already registered
     if user.get("is_registered", 0) == 1:
         await message.answer(
             t(message.from_user.id, "already_registered").format(position=user.get("position", "N/A")),
@@ -1008,7 +1005,6 @@ async def cmd_start(message: Message) -> None:
         )
         return
     
-    # Show language selection first
     await message.answer(
         t(message.from_user.id, "choose_language"),
         reply_markup=language_keyboard()
@@ -1033,6 +1029,10 @@ async def set_language_callback(callback: CallbackQuery) -> None:
         )
     await callback.answer()
 
+# Глобал "cancel" текширувчи функция: FSM ичида "❌ Bekor qilish" босилса
+async def is_cancel(message: Message) -> bool:
+    return message.text in [TEXTS['uz']['cancel'], TEXTS['ru']['cancel']]
+
 @driver_router.message(F.text.in_([TEXTS['uz']['register_btn'], TEXTS['ru']['register_btn']]))
 async def start_registration(message: Message, state: FSMContext) -> None:
     user = get_user_by_telegram(message.from_user.id)
@@ -1052,7 +1052,7 @@ async def start_registration(message: Message, state: FSMContext) -> None:
 
 @driver_router.message(RegisterStates.name)
 async def register_name(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
+    if await is_cancel(message):
         await state.clear()
         await message.answer(t(message.from_user.id, "register_cancel"), reply_markup=welcome_keyboard(message.from_user.id))
         return
@@ -1071,7 +1071,7 @@ async def register_name(message: Message, state: FSMContext) -> None:
 
 @driver_router.message(RegisterStates.phone)
 async def register_phone(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
+    if await is_cancel(message):
         await state.clear()
         await message.answer(t(message.from_user.id, "register_cancel"), reply_markup=welcome_keyboard(message.from_user.id))
         return
@@ -1090,7 +1090,7 @@ async def register_phone(message: Message, state: FSMContext) -> None:
 
 @driver_router.message(RegisterStates.card)
 async def register_card(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
+    if await is_cancel(message):
         await state.clear()
         await message.answer(t(message.from_user.id, "register_cancel"), reply_markup=welcome_keyboard(message.from_user.id))
         return
@@ -1109,7 +1109,7 @@ async def register_card(message: Message, state: FSMContext) -> None:
 
 @driver_router.message(RegisterStates.car_model)
 async def register_car_model(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
+    if await is_cancel(message):
         await state.clear()
         await message.answer(t(message.from_user.id, "register_cancel"), reply_markup=welcome_keyboard(message.from_user.id))
         return
@@ -1128,7 +1128,7 @@ async def register_car_model(message: Message, state: FSMContext) -> None:
 
 @driver_router.message(RegisterStates.car_number)
 async def register_car_number(message: Message, state: FSMContext) -> None:
-    if message.text == t(message.from_user.id, "cancel"):
+    if await is_cancel(message):
         await state.clear()
         await message.answer(t(message.from_user.id, "register_cancel"), reply_markup=welcome_keyboard(message.from_user.id))
         return
@@ -1180,9 +1180,301 @@ async def register_car_number(message: Message, state: FSMContext) -> None:
             reply_markup=welcome_keyboard(message.from_user.id)
         )
 
+# ================== АСОСИЙ МЕНЮ ТУГМАЛАРИ (ЮҚОРИДАГИ БОТ ТУХТАБ ҚОЛАЁТГАН ЖОЙ) ==================
+# Энди ҳар бир тугма ишлайдиган бўлди
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_balance'], TEXTS['ru']['menu_balance']]))
+async def menu_balance(message: Message) -> None:
+    user = get_user_by_telegram(message.from_user.id)
+    if not user or user.get("is_registered", 0) == 0:
+        await message.answer(t(message.from_user.id, "register_again"))
+        return
+    
+    await message.answer(
+        f"{t(message.from_user.id, 'balance_title')}\n\n"
+        f"{t(message.from_user.id, 'balance_current')}: <b>{fmt_sum(user['balance'])}</b>\n"
+        f"{t(message.from_user.id, 'balance_blocked')}: <b>{fmt_sum(user['blocked_balance'])}</b>\n"
+        f"{t(message.from_user.id, 'balance_available')}: <b>{fmt_sum(safe_float(user['balance']))}</b>"
+    )
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_today_orders'], TEXTS['ru']['menu_today_orders']]))
+async def menu_today_orders(message: Message) -> None:
+    orders = get_today_orders(message.from_user.id)
+    stats = get_driver_stats(message.from_user.id)
+    
+    text = f"{t(message.from_user.id, 'orders_today_title')}\n\n"
+    if not orders:
+        text += t(message.from_user.id, 'orders_today_empty')
+    else:
+        text += f"{t(message.from_user.id, 'orders_total')}: {len(orders)} ta\n"
+        text += f"{t(message.from_user.id, 'orders_earnings')}: <b>{fmt_sum(stats['today_sum'])}</b>\n\n"
+        for order in orders:
+            status_text = t(message.from_user.id, "status_completed") if order['status'] == 'completed' else t(message.from_user.id, "status_new")
+            text += f"{t(message.from_user.id, 'order_id')}: <code>#{order['id']}</code> | {fmt_sum(order['amount'])} | {status_text}\n"
+    
+    await message.answer(text)
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_withdraw'], TEXTS['ru']['menu_withdraw']]))
+async def menu_withdraw(message: Message, state: FSMContext) -> None:
+    user = get_user_by_telegram(message.from_user.id)
+    if not user or user.get("is_registered", 0) == 0:
+        await message.answer(t(message.from_user.id, "register_again"))
+        return
+    
+    await state.set_state(WithdrawStates.amount)
+    await message.answer(
+        f"{t(message.from_user.id, 'withdraw_title')}\n\n"
+        f"{t(message.from_user.id, 'withdraw_available')}: <b>{fmt_sum(user['balance'])}</b>\n"
+        f"{t(message.from_user.id, 'withdraw_min')}: <b>{fmt_sum(MIN_WITHDRAWAL)}</b>\n"
+        f"{t(message.from_user.id, 'withdraw_commission')}: <b>{COMMISSION_PERCENT}%</b>\n\n"
+        f"{t(message.from_user.id, 'withdraw_amount_ask')}",
+        reply_markup=cancel_keyboard(message.from_user.id)
+    )
+
+@driver_router.message(WithdrawStates.amount)
+async def withdraw_amount(message: Message, state: FSMContext) -> None:
+    if await is_cancel(message):
+        await state.clear()
+        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
+        return
+    
+    try:
+        amount = float(message.text.replace(" ", "").replace("so'm", ""))
+    except:
+        await message.answer(t(message.from_user.id, "invalid_input"))
+        return
+    
+    user = get_user_by_telegram(message.from_user.id)
+    
+    if amount < MIN_WITHDRAWAL:
+        await message.answer(t(message.from_user.id, "withdraw_min_error").format(min=fmt_sum(MIN_WITHDRAWAL)))
+        return
+    
+    if amount > safe_float(user['balance']):
+        await message.answer(t(message.from_user.id, "withdraw_balance_error"))
+        return
+    
+    await state.update_data(amount=amount)
+    await state.set_state(WithdrawStates.payment_type)
+    await message.answer(
+        t(message.from_user.id, "withdraw_type_ask"),
+        reply_markup=withdraw_type_keyboard(message.from_user.id)
+    )
+
+# Барча турдаги тугмаларни ушлайдиган ҳендлер (Карта, Нақд, БРБ)
+@driver_router.message(F.text.in_([TEXTS['uz']['withdraw_type_card'], TEXTS['ru']['withdraw_type_card'],
+                                   TEXTS['uz']['withdraw_type_cash'], TEXTS['ru']['withdraw_type_cash'],
+                                   TEXTS['uz']['withdraw_type_brb'], TEXTS['ru']['withdraw_type_brb']]))
+async def withdraw_type(message: Message, state: FSMContext) -> None:
+    if await is_cancel(message):
+        await state.clear()
+        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
+        return
+    
+    payment_type = message.text.split()[-1]  # 'kartaga', 'naqd', 'brb'
+    await state.update_data(payment_type=payment_type)
+    
+    if payment_type in ["Kartaga", "На карту", "kartaga"]:
+        await state.set_state(WithdrawStates.card_number)
+        await message.answer(t(message.from_user.id, "withdraw_card_ask"))
+    else:
+        await state.set_state(WithdrawStates.phone_number)
+        await message.answer(t(message.from_user.id, "withdraw_phone_ask"))
+
+@driver_router.message(WithdrawStates.card_number)
+async def withdraw_card_number(message: Message, state: FSMContext) -> None:
+    if await is_cancel(message):
+        await state.clear()
+        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
+        return
+    
+    card = normalize_card(message.text)
+    if not is_valid_card(card):
+        await message.answer(t(message.from_user.id, "invalid_card"))
+        return
+    
+    await state.update_data(card_number=card)
+    data = await state.get_data()
+    
+    withdrawal_id = create_withdrawal(
+        message.from_user.id,
+        data['amount'],
+        data['payment_type'],
+        card_number=card
+    )
+    
+    await state.clear()
+    
+    if withdrawal_id:
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"💸 <b>Yangi pul yechish so'rovi!</b>\n\n"
+                    f"🆔 ID: #{withdrawal_id}\n"
+                    f"👤 Haydovchi: {message.from_user.full_name}\n"
+                    f"💰 Summa: {fmt_sum(data['amount'])}\n"
+                    f"💳 Kartaga: {card}\n"
+                    f"Telegram ID: {message.from_user.id}"
+                )
+            except Exception:
+                pass
+        
+        await message.answer(t(message.from_user.id, "withdraw_success"), reply_markup=user_main_menu(message.from_user.id))
+    else:
+        await message.answer(t(message.from_user.id, "withdraw_fail"), reply_markup=user_main_menu(message.from_user.id))
+
+@driver_router.message(WithdrawStates.phone_number)
+async def withdraw_phone_number(message: Message, state: FSMContext) -> None:
+    if await is_cancel(message):
+        await state.clear()
+        await message.answer(t(message.from_user.id, "action_cancelled"), reply_markup=user_main_menu(message.from_user.id))
+        return
+    
+    phone = normalize_phone(message.text)
+    if not is_valid_phone(phone):
+        await message.answer(t(message.from_user.id, "invalid_phone"))
+        return
+    
+    await state.update_data(phone_number=phone)
+    data = await state.get_data()
+    
+    withdrawal_id = create_withdrawal(
+        message.from_user.id,
+        data['amount'],
+        data['payment_type'],
+        phone_number=phone
+    )
+    
+    await state.clear()
+    
+    if withdrawal_id:
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"💸 <b>Yangi pul yechish so'rovi!</b>\n\n"
+                    f"🆔 ID: #{withdrawal_id}\n"
+                    f"👤 Haydovchi: {message.from_user.full_name}\n"
+                    f"💰 Summa: {fmt_sum(data['amount'])}\n"
+                    f"📱 Telefon: {phone}\n"
+                    f"Telegram ID: {message.from_user.id}"
+                )
+            except Exception:
+                pass
+        
+        await message.answer(t(message.from_user.id, "withdraw_success"), reply_markup=user_main_menu(message.from_user.id))
+    else:
+        await message.answer(t(message.from_user.id, "withdraw_fail"), reply_markup=user_main_menu(message.from_user.id))
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_history'], TEXTS['ru']['menu_history']]))
+async def menu_history(message: Message) -> None:
+    withdrawals = get_withdrawals(message.from_user.id)
+    text = f"📜 <b>To'lovlar tarixi</b>\n\n"
+    if not withdrawals:
+        text += "Hozircha to'lovlar yo'q 📭"
+    else:
+        for w in withdrawals:
+            status_text = t(message.from_user.id, "withdraw_pending") if w['status'] == 'pending' else t(message.from_user.id, "withdraw_completed") if w['status'] == 'completed' else t(message.from_user.id, "withdraw_cancelled")
+            text += f"#{w['id']} | {fmt_sum(w['net_amount'])} | {status_text}\n"
+    await message.answer(text)
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_profile'], TEXTS['ru']['menu_profile']]))
+async def menu_profile(message: Message) -> None:
+    user = get_user_by_telegram(message.from_user.id)
+    if not user:
+        await message.answer(t(message.from_user.id, "register_again"))
+        return
+    
+    status_text = t(message.from_user.id, "profile_status_active") if user['is_blocked'] == 0 else t(message.from_user.id, "profile_status_blocked")
+    
+    await message.answer(
+        f"{t(message.from_user.id, 'profile_title')}\n\n"
+        f"{t(message.from_user.id, 'profile_id')}: <code>{user['id']}</code>\n"
+        f"{t(message.from_user.id, 'profile_position')}: <code>{user['position']}</code>\n"
+        f"{t(message.from_user.id, 'profile_name')}: {user['full_name']}\n"
+        f"{t(message.from_user.id, 'profile_phone')}: {user['phone']}\n"
+        f"{t(message.from_user.id, 'profile_card')}: {user['card_number']}\n"
+        f"{t(message.from_user.id, 'profile_car')}: {user['car_model']} | {user['car_number']}\n"
+        f"{t(message.from_user.id, 'profile_orders')}: {user['total_orders']}\n"
+        f"{t(message.from_user.id, 'profile_earnings')}: {fmt_sum(user['total_earnings'])}\n"
+        f"{t(message.from_user.id, 'profile_status')}: {status_text}"
+    )
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_news'], TEXTS['ru']['menu_news']]))
+async def menu_news(message: Message) -> None:
+    await message.answer(t(message.from_user.id, "news_empty"))
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_group'], TEXTS['ru']['menu_group']]))
+async def menu_group(message: Message) -> None:
+    if DRIVER_GROUP_LINK:
+        await message.answer(f"{t(message.from_user.id, 'support_group')}: <a href='{DRIVER_GROUP_LINK}'>Havola</a>")
+    else:
+        await message.answer("Guruh havolasi sozlanmagan.")
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_support'], TEXTS['ru']['menu_support']]))
+async def menu_support(message: Message) -> None:
+    await message.answer(
+        f"{t(message.from_user.id, 'support_title')}\n\n"
+        f"{t(message.from_user.id, 'support_phone')}: {SUPPORT_PHONE}\n"
+        f"{t(message.from_user.id, 'support_tg')}: {SUPPORT_TG}\n"
+        f"{t(message.from_user.id, 'support_text')}"
+    )
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_settings'], TEXTS['ru']['menu_settings']]))
+async def menu_settings(message: Message) -> None:
+    await message.answer(t(message.from_user.id, "settings_title"), reply_markup=language_keyboard())
+
+@driver_router.callback_query(F.data.startswith("lang:set:"))
+async def settings_lang_callback(callback: CallbackQuery) -> None:
+    lang = callback.data.split(":")[-1]
+    if lang in SUPPORTED_LANGS:
+        conn = get_db()
+        conn.execute("UPDATE users SET language = ?, updated_at = ? WHERE telegram_id = ?", (lang, utc_now_iso(), callback.from_user.id))
+        conn.commit()
+        conn.close()
+        
+        await callback.message.delete()
+        await callback.message.answer(t(lang, "lang_updated"), reply_markup=user_main_menu(callback.from_user.id))
+    await callback.answer()
+
+@driver_router.message(F.text.in_([TEXTS['uz']['menu_admin'], TEXTS['ru']['menu_admin']]))
+async def menu_admin(message: Message) -> None:
+    if is_admin(message.from_user.id):
+        await message.answer(t(message.from_user.id, "admin_title"), reply_markup=admin_main_menu(message.from_user.id))
+    else:
+        await message.answer(t(message.from_user.id, "not_admin"))
+
+# Админ бўлими тугмалари
+@driver_router.message(F.text.in_([TEXTS['uz']['admin_drivers'], TEXTS['ru']['admin_drivers']]))
+async def admin_drivers(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer(t(message.from_user.id, "not_admin"))
+        return
+    
+    drivers = get_all_drivers()
+    text = f"👥 <b>{t(message.from_user.id, 'admin_drivers')}</b> ({len(drivers)})\n\n"
+    for d in drivers:
+        text += f"🆔 {d['position']} | {d['full_name']} | {d['car_number']}\n"
+    
+    await message.answer(text)
+
+@driver_router.message(F.text.in_([TEXTS['uz']['admin_balances'], TEXTS['ru']['admin_balances']]))
+async def admin_balances(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        await message.answer(t(message.from_user.id, "not_admin"))
+        return
+    
+    drivers = get_all_drivers()
+    text = f"💰 <b>{t(message.from_user.id, 'admin_balances')}</b>\n\n"
+    for d in drivers:
+        text += f"{d['full_name']} ({d['position']}): {fmt_sum(d['balance'])}\n"
+    
+    await message.answer(text)
+
 
 # ============================================================
-# WEB ROUTES - БУ ЕРГА ЭЪТИБОР БЕРИНГ!
+# WEB ROUTES
 # ============================================================
 
 @web_router.get("/")
@@ -1250,6 +1542,8 @@ async def main() -> None:
     logger.info(f"✅ Bot running on port {PORT}")
     logger.info(f"✅ Web server started")
     
+    # Муҳим: Webhook'ни ўчириб, Polling'ни ишга туширамиз (409 хатоликни олдини олади)
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
