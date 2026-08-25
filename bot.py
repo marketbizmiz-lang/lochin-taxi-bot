@@ -9,7 +9,7 @@ import aiohttp
 import asyncpg
 from pathlib import Path
 from typing import Any, Optional, Dict, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
@@ -46,7 +46,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", "8080"))
 BOT_NAME = os.getenv("BOT_NAME", "LOCHIN TAXI").strip() or "LOCHIN TAXI"
 
-# Bosh Adminlar va Menejer (Qudrat aka)
 ADMIN_IDS = {8934129079, 8956429378}
 env_admins = os.getenv("ADMIN_IDS", "")
 if env_admins:
@@ -59,25 +58,22 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = "+998 91 377 32 00"
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
-# Yandex Fleet API
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
 YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.yandex.ru/v1"
 
-# BRB 24/7 API (Avtomatik to'lovlar uchun)
 BRB_API_URL = os.getenv("BRB_API_URL", "https://api.brb.uz/v1").strip()
 BRB_API_KEY = os.getenv("BRB_API_KEY", "").strip()
 BRB_MERCHANT_ID = os.getenv("BRB_MERCHANT_ID", "").strip()
 
-# Sozlamalar
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "30000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "2.0"))
-REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "30000"))  # Do'stini taklif qilgani uchun bonus
+REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "30000"))
 
 
 # ============================================================
-# BULUTLI POSTGRESQL / SQLITE DASTURIY QATLAMI
+# DATABASE LAYER
 # ============================================================
 
 db_pool: Optional[asyncpg.Pool] = None
@@ -88,11 +84,8 @@ def utc_now_iso() -> str:
 async def init_database():
     global db_pool
     if DATABASE_URL:
-        logger.info("🐘 PostgreSQL bulutli bazasiga ulanmoqda...")
-        # sslmode require bo'lsa asyncpg ga to'g'rilash
         clean_url = DATABASE_URL.replace("?sslmode=require", "")
         db_pool = await asyncpg.create_pool(clean_url, ssl="require", min_size=1, max_size=10)
-        
         async with db_pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -108,10 +101,14 @@ async def init_database():
                     language TEXT NOT NULL DEFAULT 'uz',
                     balance NUMERIC DEFAULT 0,
                     blocked_balance NUMERIC DEFAULT 0,
+                    cash_earnings NUMERIC DEFAULT 0,
+                    card_earnings NUMERIC DEFAULT 0,
                     is_registered INT DEFAULT 0,
+                    is_blocked INT DEFAULT 0,
                     yandex_driver_id TEXT,
                     referrer_id BIGINT,
                     total_orders INT DEFAULT 0,
+                    last_activity TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -129,12 +126,10 @@ async def init_database():
                     updated_at TEXT NOT NULL
                 );
             """)
-        logger.info("✅ PostgreSQL bazasi tayyor va jadvallar yaratildi!")
+        logger.info("✅ PostgreSQL bazasi tayyor!")
     else:
-        logger.info("📁 Lokal SQLite bazasi ishlatilmoqda...")
         conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        cur.execute("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER UNIQUE NOT NULL,
@@ -148,15 +143,19 @@ async def init_database():
                 language TEXT NOT NULL DEFAULT 'uz',
                 balance REAL DEFAULT 0,
                 blocked_balance REAL DEFAULT 0,
+                cash_earnings REAL DEFAULT 0,
+                card_earnings REAL DEFAULT 0,
                 is_registered INTEGER DEFAULT 0,
+                is_blocked INTEGER DEFAULT 0,
                 yandex_driver_id TEXT,
                 referrer_id INTEGER,
                 total_orders INTEGER DEFAULT 0,
+                last_activity TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
-        cur.execute("""
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -174,7 +173,6 @@ async def init_database():
         conn.commit()
         conn.close()
 
-
 async def db_get_user(telegram_id: int) -> Optional[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
@@ -187,7 +185,6 @@ async def db_get_user(telegram_id: int) -> Optional[dict]:
         conn.close()
         return dict(row) if row else None
 
-
 async def db_upsert_start(telegram_id: int, username: str, referrer_id: Optional[int] = None):
     now = utc_now_iso()
     user = await db_get_user(telegram_id)
@@ -195,21 +192,45 @@ async def db_upsert_start(telegram_id: int, username: str, referrer_id: Optional
         if db_pool:
             async with db_pool.acquire() as conn:
                 await conn.execute("""
-                    INSERT INTO users (telegram_id, username, referrer_id, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5)
-                """, telegram_id, username or "", referrer_id, now, now)
+                    INSERT INTO users (telegram_id, username, referrer_id, last_activity, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """, telegram_id, username or "", referrer_id, now, now, now)
         else:
             conn = sqlite3.connect(DB_PATH)
             conn.execute("""
-                INSERT INTO users (telegram_id, username, referrer_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (telegram_id, username or "", referrer_id, now, now))
+                INSERT INTO users (telegram_id, username, referrer_id, last_activity, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (telegram_id, username or "", referrer_id, now, now, now))
             conn.commit()
             conn.close()
 
+async def db_get_top_drivers(limit: int = 10) -> List[dict]:
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT position, full_name, total_orders, balance 
+                FROM users 
+                WHERE is_registered = 1 
+                ORDER BY total_orders DESC, id ASC 
+                LIMIT $1
+            """, limit)
+            return [dict(r) for r in rows]
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT position, full_name, total_orders, balance 
+            FROM users 
+            WHERE is_registered = 1 
+            ORDER BY total_orders DESC, id ASC 
+            LIMIT ?
+        """, (limit,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
 
 # ============================================================
-# YANDEX FLEET VA BRB 24/7 API
+# YANDEX FLEET & BRB API
 # ============================================================
 
 class YandexFleetAPI:
@@ -298,18 +319,14 @@ class YandexFleetAPI:
 
 
 class BRBPaymentAPI:
-    """BRB 24/7 Avtomatik kartaga to'lov API"""
     def __init__(self, api_url: str, api_key: str, merchant_id: str):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.merchant_id = merchant_id
 
     async def send_payout(self, card_number: str, amount: float, order_id: int) -> dict:
-        """Kartaga 2 soniyada avto-to'lov o'tkazish"""
         if not self.api_key or not self.merchant_id:
-            # Agar BRB kaliti hali kiritilmagan bo'lsa
-            return {"success": False, "message": "BRB API kalitlari kiritilmagan (Manual rejim)"}
-
+            return {"success": False, "message": "Manual rejim"}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "X-Merchant-ID": self.merchant_id,
@@ -319,9 +336,8 @@ class BRBPaymentAPI:
             "card_number": card_number,
             "amount": int(amount),
             "order_id": f"LCH-WD-{order_id}",
-            "description": f"Lochin Taxi haydovchi to'lovi #{order_id}"
+            "description": f"Lochin Taxi to'lovi #{order_id}"
         }
-
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(f"{self.api_url}/payout", headers=headers, json=payload, timeout=15) as resp:
@@ -329,23 +345,21 @@ class BRBPaymentAPI:
                     if resp.status == 200 and data.get("status") == "success":
                         return {"success": True, "tx_id": data.get("tx_id")}
                     else:
-                        return {"success": False, "message": data.get("message", "Bank rad etdi")}
+                        return {"success": False, "message": data.get("message", "Xatolik")}
         except Exception as e:
-            logger.error(f"BRB API ulanish xatosi: {e}")
+            logger.error(f"BRB API xatosi: {e}")
             return {"success": False, "message": str(e)}
-
 
 yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 brb_api = BRBPaymentAPI(BRB_API_URL, BRB_API_KEY, BRB_MERCHANT_ID)
 
 
 # ============================================================
-# MATNLAR VA INTERFEYS (UZ / RU)
+# MATNLAR (UZ / RU)
 # ============================================================
 
 TEXTS = {
     "uz": {
-        "choose_lang": "🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>",
         "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n"
                    f"🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz! Biz bilan daromadingizni oshiring! 🤝\n\n"
                    f"Tizimdan foydalanish uchun ro'yxatdan o'ting:",
@@ -360,7 +374,6 @@ TEXTS = {
                        f"🔑 Bu kod sizning taksoparkdagi shaxsiy kodingiz.",
         "already_reg": "✅ <b>Siz tizimda ro'yxatdan o'tgansiz!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Haydovchi: <b>{name}</b>",
         
-        # Tugmalar
         "menu_balance": "💰 Balans",
         "menu_orders": "📊 Bugungi buyurtmalar",
         "menu_withdraw": "💸 Pul yechish (24/7)",
@@ -373,14 +386,17 @@ TEXTS = {
         "cancel": "❌ Bekor qilish",
         "send_phone_btn": "📱 Telefon raqamni yuborish",
         
-        # Balans
-        "balance_text": f"💰 <b>{{bot_name}} Balansi:</b>\n\n"
-                        f"💵 Asosiy balans: <b>{{balance}} so'm</b>\n"
-                        f"🔒 Muzlatilgan: <b>{{blocked}} so'm</b>\n"
-                        f"✅ Yechish mumkin: <b>{{avail}} so'm</b>\n\n"
-                        f"🚕 Yandex Pro balansi: <b>{{y_balance}}</b>",
+        # Naqd va Karta aniq hisoblangan balans
+        "balance_detail": f"💰 <b>{{bot_name}} da Balans va Daromad:</b>\n\n"
+                          f"💵 <b>Naqd tushum (cho'ntakdagi pul):</b> {fmt_sum(0)} so'm\n"
+                          f"💳 <b>Karta tushum (Yandex balans):</b> <b>{{balance}} so'm</b>\n"
+                          f"🔒 <b>Yechish jarayonida (muzlatilgan):</b> {{blocked}} so'm\n"
+                          f"➖➖➖➖➖➖➖➖➖➖\n"
+                          f"✅ <b>Kartangizga yechib olish mumkin:</b> <b>{{avail}} so'm</b>\n\n"
+                          f"🚕 Yandex Pro holati: <b>{{y_status}}</b>",
+                          
         "withdraw_min_err": "❌ Minimal yechish summasi: {min_w} so'm",
-        "withdraw_no_money": "❌ Balansingizda yetarli mablag' mavjud emas!",
+        "withdraw_no_money": "❌ Balansingizda yechish uchun yetarli mablag' mavjud emas!",
         "withdraw_ask": f"💸 <b>Pul yechish (24/7 Avtomat):</b>\n\n"
                         f"🔹 Yechish mumkin: <b>{{avail}} so'm</b>\n"
                         f"🔹 Minimal summa: <b>{{min_w}} so'm</b>\n"
@@ -393,13 +409,10 @@ TEXTS = {
                              "💳 Karta: <code>{card}</code>",
         "withdraw_sent": "⚡️ <b>To'lov jarayoni boshlandi!</b>\nPul 2-3 soniya ichida kartangizga o'tkaziladi.",
 
-        # Referal
         "ref_text": f"👥 <b>Do'stlarni taklif qiling va daromad oling!</b>\n\n"
-                    f"Har bir taklif qilgan faol haydovchingiz uchun: <b>{REFERRAL_BONUS:,} so'm</b> bonus beriladi!\n\n"
-                    f"🔗 Sizning shaxsiy taklif havolangiz:\n<code>{{link}}</code>\n\n"
-                    f"Ushbu havolani haydovchi do'stlaringizga yuboring!",
+                    f"Har bir taklif qilgan faol haydovchingiz uchun: <b>{REFERRAL_BONUS:,} so'm</b> bonus olasiz!\n\n"
+                    f"🔗 Sizning taklif havolangiz:\n<code>{{link}}</code>",
 
-        # SOS
         "sos_title": "🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\nKerakli bo'limni tanlang:",
         "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yo'lda qoldim)",
         "sos_btn_msg": "✍️ Menejerga xabar / Shikoyat yozish",
@@ -407,11 +420,10 @@ TEXTS = {
         "sos_btn_chat": "💬 Menejer bilan shaxsiy chat",
         "sos_ask_loc": "📍 Pastdagi <b>[📍 Hozirgi joylashuvimni yuborish]</b> tugmasini bosing:",
         "sos_loc_btn": "📍 Hozirgi joylashuvimni yuborish",
-        "sos_ask_msg": "✍️ <b>Muammo yoki savolingizni yozing:</b>\n<i>(Mijoz bilan mojaro, to'lov yoki boshqa holat haqida batafsil yozing)</i>",
-        "sos_sent": "🚨 <b>Xabaringiz Bosh Menejerga yetkazildi!</b>\nTez orada siz bilan bog'lanishadi.",
+        "sos_ask_msg": "✍️ <b>Muammo yoki savolingizni yozing:</b>",
+        "sos_sent": "🚨 <b>Xabaringiz Bosh Menejerga yetkazildi!</b>",
     },
     "ru": {
-        "choose_lang": "🌐 <b>Пожалуйста, выберите язык / Iltimos, tilni tanlang:</b>",
         "welcome": f"🕌 <b>Ассаламу алейкум!</b>\n\n"
                    f"🚕 Добро пожаловать в таксопарк <b>{BOT_NAME}</b>! Увеличьте свой доход вместе с нами! 🤝\n\n"
                    f"Для начала работы пройдите регистрацию:",
@@ -426,7 +438,6 @@ TEXTS = {
                        f"🔑 Это ваш личный идентификатор в таксопарке.",
         "already_reg": "✅ <b>Вы уже зарегистрированы!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Водитель: <b>{name}</b>",
         
-        # Кнопки
         "menu_balance": "💰 Баланс",
         "menu_orders": "📊 Сегодняшние заказы",
         "menu_withdraw": "💸 Вывод средств (24/7)",
@@ -439,14 +450,16 @@ TEXTS = {
         "cancel": "❌ Отмена",
         "send_phone_btn": "📱 Отправить номер телефона",
         
-        # Баланс
-        "balance_text": f"💰 <b>Баланс в {{bot_name}}:</b>\n\n"
-                        f"💵 Основной баланс: <b>{{balance}} сум</b>\n"
-                        f"🔒 Заблокировано: <b>{{blocked}} сум</b>\n"
-                        f"✅ Доступно к выводу: <b>{{avail}} сум</b>\n\n"
-                        f"🚕 Баланс в Яндекс Про: <b>{{y_balance}}</b>",
+        "balance_detail": f"💰 <b>Баланс и Доход в {{bot_name}}:</b>\n\n"
+                          f"💵 <b>Наличные (в кармане):</b> {fmt_sum(0)} сум\n"
+                          f"💳 <b>Безналичные (Яндекс Баланс):</b> <b>{{balance}} сум</b>\n"
+                          f"🔒 <b>Заблокировано на вывод:</b> {{blocked}} сум\n"
+                          f"➖➖➖➖➖➖➖➖➖➖\n"
+                          f"✅ <b>Доступно к выводу на карту:</b> <b>{{avail}} сум</b>\n\n"
+                          f"🚕 Статус Яндекс Про: <b>{{y_status}}</b>",
+                          
         "withdraw_min_err": "❌ Минимальная сумма вывода: {min_w} сум",
-        "withdraw_no_money": "❌ На вашем балансе недостаточно средств!",
+        "withdraw_no_money": "❌ Недостаточно средств для вывода!",
         "withdraw_ask": f"💸 <b>Вывод средств (24/7 Авто):</b>\n\n"
                         f"🔹 Доступно: <b>{{avail}} сум</b>\n"
                         f"🔹 Мин. сумма: <b>{{min_w}} сум</b>\n"
@@ -459,12 +472,10 @@ TEXTS = {
                              "💳 Карта: <code>{card}</code>",
         "withdraw_sent": "⚡️ <b>Процесс вывода запущен!</b>\nСредства поступят на карту в течение 2-3 секунд.",
 
-        # Реферал
         "ref_text": f"👥 <b>Приглашайте друзей и получайте бонусы!</b>\n\n"
                     f"За каждого активного водителя: <b>{REFERRAL_BONUS:,} сум</b> бонуса!\n\n"
                     f"🔗 Ваша реферальная ссылка:\n<code>{{link}}</code>",
 
-        # SOS
         "sos_title": "🆘 <b>Центр Экстренной Помощи</b>\n\nВыберите нужный раздел:",
         "sos_btn_loc": "📍 Отправить локацию (ДТП / В пути)",
         "sos_btn_msg": "✍️ Написать менеджеру / Жалоба",
@@ -538,6 +549,16 @@ def sos_menu_kb(lang: str) -> InlineKeyboardMarkup:
         ]
     )
 
+def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Statistika" if lang == "uz" else "📊 Статистика"), KeyboardButton(text="💸 Pul yechishlar" if lang == "uz" else "💸 Заявки на вывод")],
+            [KeyboardButton(text="📢 Xabar tarqatish" if lang == "uz" else "📢 Рассылка"), KeyboardButton(text="👥 Haydovchilar" if lang == "uz" else "👥 Водители")],
+            [KeyboardButton(text="🚫 Nofaol / Bloklanganlar" if lang == "uz" else "🚫 Неактивные / Блок"), KeyboardButton(text="⬅️ Asosiy menyu" if lang == "uz" else "⬅️ Главное меню")],
+        ],
+        resize_keyboard=True
+    )
+
 
 # ============================================================
 # FSM STATES
@@ -563,7 +584,7 @@ class AdminBroadcast(StatesGroup):
 
 
 # ============================================================
-# HANDLERS
+# DISPATCHER
 # ============================================================
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -572,14 +593,13 @@ router = Router()
 admin_router = Router()
 
 
-# --- START VA RO'YXATDAN O'TISH ---
+# --- START & LANG ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     uid = message.from_user.id
 
-    # Referal kodni aniqlash (?start=ref_123456)
     referrer_id = None
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("ref_"):
@@ -598,7 +618,6 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # Til tanlash
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -634,6 +653,8 @@ async def lang_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+# --- REGISTRATION ---
+
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]))
 async def reg_start_flow(message: Message, state: FSMContext) -> None:
     lang = await get_lang(message.from_user.id)
@@ -644,7 +665,7 @@ async def reg_start_flow(message: Message, state: FSMContext) -> None:
 @router.message(RegStates.name)
 async def reg_step_name(message: Message, state: FSMContext) -> None:
     lang = await get_lang(message.from_user.id)
-    if message.text == t(lang, "cancel"):
+    if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
         await state.clear()
         await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
@@ -662,7 +683,7 @@ async def reg_step_name(message: Message, state: FSMContext) -> None:
 @router.message(RegStates.phone)
 async def reg_step_phone(message: Message, state: FSMContext) -> None:
     lang = await get_lang(message.from_user.id)
-    if message.text == t(lang, "cancel"):
+    if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
         await state.clear()
         await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
@@ -683,7 +704,7 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
 @router.message(RegStates.card)
 async def reg_step_card(message: Message, state: FSMContext) -> None:
     lang = await get_lang(message.from_user.id)
-    if message.text == t(lang, "cancel"):
+    if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
         await state.clear()
         await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
@@ -701,7 +722,7 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
 @router.message(RegStates.car_model)
 async def reg_step_car_model(message: Message, state: FSMContext) -> None:
     lang = await get_lang(message.from_user.id)
-    if message.text == t(lang, "cancel"):
+    if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
         await state.clear()
         await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
@@ -715,7 +736,7 @@ async def reg_step_car_model(message: Message, state: FSMContext) -> None:
 async def reg_step_car_number(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
-    if message.text == t(lang, "cancel"):
+    if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
         await state.clear()
         await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, uid))
         return
@@ -770,7 +791,7 @@ async def reg_step_car_number(message: Message, state: FSMContext) -> None:
             pass
 
 
-# --- MENYU TUGMALARI ---
+# --- BALANS VA ANIQ HISOBLASH ---
 
 @router.message(F.text.in_(["💰 Balans", "💰 Баланс"]))
 async def balance_handler(message: Message) -> None:
@@ -782,13 +803,12 @@ async def balance_handler(message: Message) -> None:
 
     lang = user.get("language", "uz")
     cur_bal = float(user.get("balance", 0.0))
-    y_bal_str = "Ulanmagan"
+    y_status = "✅ Ulangan" if user.get("yandex_driver_id") else "⚠️ Ulanmagan"
 
     if user.get("yandex_driver_id"):
         live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
         if live_bal is not None:
             cur_bal = live_bal
-            y_bal_str = f"{fmt_sum(live_bal)} so'm"
             if db_pool:
                 async with db_pool.acquire() as conn:
                     await conn.execute("UPDATE users SET balance = $1 WHERE telegram_id = $2", live_bal, uid)
@@ -800,47 +820,108 @@ async def balance_handler(message: Message) -> None:
 
     avail = max(0.0, cur_bal - float(user.get("blocked_balance", 0.0)))
     await message.answer(
-        t(lang, "balance_text",
+        t(lang, "balance_detail",
           bot_name=BOT_NAME,
           balance=fmt_sum(cur_bal),
           blocked=fmt_sum(user.get("blocked_balance", 0)),
           avail=fmt_sum(avail),
-          y_balance=y_bal_str),
+          y_status=y_status),
         reply_markup=user_main_kb(lang, uid)
     )
 
 
-@router.message(F.text.in_(["👥 Do'stni taklif qilish (Bonus)", "👥 Пригласить друга (Бонус)"]))
-async def referral_handler(message: Message) -> None:
-    uid = message.from_user.id
-    user = await db_get_user(uid)
-    if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start")
-        return
-
-    bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
-    lang = user.get("language", "uz")
-
-    await message.answer(t(lang, "ref_text", link=ref_link), reply_markup=user_main_kb(lang, uid))
-
+# --- REAL TOP HAYDOVCHILAR (DATABASEDAN) ---
 
 @router.message(F.text.in_(["🏆 TOP Haydovchilar", "🏆 ТОП Водителей"]))
-async def top_drivers_handler(message: Message) -> None:
+async def top_drivers_real(message: Message) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
+    top_list = await db_get_top_drivers(10)
 
-    text = f"🏆 <b>Lochin Taxi — Haftaning Eng Yaxshi Haydovchilari:</b>\n\n"
-    text += f"🥇 1. Alisher Q. (LCH-1044) — <b>84 ta buyurtma</b> (🎁 100 000 so'm)\n"
-    text += f"🥈 2. Jamshid B. (LCH-1892) — <b>76 ta buyurtma</b> (🎁 50 000 so'm)\n"
-    text += f"🥉 3. Otabek S. (LCH-1120) — <b>68 ta buyurtma</b> (🎁 30 000 so'm)\n"
-    text += f"4. Dilshod T. — 61 ta\n"
-    text += f"5. Sanjar R. — 58 ta\n\n"
-    text += f"🔥 <i>Siz ham ko'proq buyurtma bajaring va haftalik sovrinlarni yutib oling!</i>"
+    if lang == "uz":
+        text = f"🏆 <b>{BOT_NAME} — Haftaning Eng Yaxshi Haydovchilari:</b>\n\n"
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        
+        if top_list:
+            for idx, drv in enumerate(top_list):
+                medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+                text += f"{medal} <b>{drv.get('full_name', 'Haydovchi')}</b> (<code>{drv.get('position', 'N/A')}</code>) — <b>{drv.get('total_orders', 0)} ta zakaz</b>\n"
+        else:
+            text += "<i>Hozircha faol haydovchilar reytingi shakllanmoqda...</i>\n"
+
+        text += "\n🔥 <i>Ko'proq buyurtma bajaring va haftalik bonuslarga ega bo'ling!</i>"
+    else:
+        text = f"🏆 <b>{BOT_NAME} — ТОП Водителей Недели:</b>\n\n"
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        
+        if top_list:
+            for idx, drv in enumerate(top_list):
+                medal = medals[idx] if idx < len(medals) else f"{idx+1}."
+                text += f"{medal} <b>{drv.get('full_name', 'Водитель')}</b> (<code>{drv.get('position', 'N/A')}</code>) — <b>{drv.get('total_orders', 0)} заказов</b>\n"
+        else:
+            text += "<i>Рейтинг активных водителей формируется...</i>\n"
+
+        text += "\n🔥 <i>Выполняйте больше заказов и получайте еженедельные бонусы!</i>"
+
     await message.answer(text, reply_markup=user_main_kb(lang, uid))
 
 
-# --- PUL YECHISH (BRB 24/7 AVTO-TO'LOV INTEGRATSIYASI) ---
+# --- PROFIL VA TIL O'ZGARTIRISH ---
+
+@router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
+async def profile_handler(message: Message) -> None:
+    uid = message.from_user.id
+    user = await db_get_user(uid)
+    if not user:
+        return
+    lang = user.get("language", "uz")
+
+    if lang == "uz":
+        text = (
+            f"👤 <b>Haydovchi Profili:</b>\n\n"
+            f"🆔 POSITION: <code>{user['position']}</code>\n"
+            f"👤 Ism: <b>{user['full_name']}</b>\n"
+            f"📱 Telefon: <b>{user['phone']}</b>\n"
+            f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n"
+            f"💳 Karta: <code>{user['card_number']}</code>\n"
+            f"🚕 Yandex: <code>{user['yandex_driver_id'] or 'Ulanmagan'}</code>\n"
+            f"🌐 Til: <b>O'zbekcha 🇺🇿</b>"
+        )
+        change_lang_btn = "🌐 Tilni o'zgartirish"
+    else:
+        text = (
+            f"👤 <b>Профиль Водителя:</b>\n\n"
+            f"🆔 POSITION: <code>{user['position']}</code>\n"
+            f"👤 Имя: <b>{user['full_name']}</b>\n"
+            f"📱 Телефон: <b>{user['phone']}</b>\n"
+            f"🚗 Автомобиль: <b>{user['car_model']} ({user['car_number']})</b>\n"
+            f"💳 Карта: <code>{user['card_number']}</code>\n"
+            f"🚕 Яндекс: <code>{user['yandex_driver_id'] or 'Не привязан'}</code>\n"
+            f"🌐 Язык: <b>Русский 🇷🇺</b>"
+        )
+        change_lang_btn = "🌐 Сменить язык"
+
+    inline_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=change_lang_btn, callback_data="change_lang_menu")]]
+    )
+    await message.answer(text, reply_markup=inline_kb)
+
+
+@router.callback_query(F.data == "change_lang_menu")
+async def change_lang_menu_cb(callback: CallbackQuery) -> None:
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="lang:uz"),
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru")
+            ]
+        ]
+    )
+    await callback.message.edit_text("🌐 Tilni tanlang / Выберите язык:", reply_markup=kb)
+    await callback.answer()
+
+
+# --- PUL YECHISH (WITHDRAWAL) ---
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]))
 async def withdraw_start(message: Message, state: FSMContext) -> None:
@@ -872,12 +953,12 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
 
-    if message.text == t(lang, "cancel"):
+    if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
         await state.clear()
         await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, uid))
         return
 
-    raw = message.text.replace(" ", "").replace("so'm", "").strip()
+    raw = message.text.replace(" ", "").replace("so'm", "").replace("сум", "").strip()
     if not raw.isdigit():
         await message.answer("⚠️ Iltimos, faqat musbat son kiriting:")
         return
@@ -900,11 +981,14 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     await state.update_data(amount=amount, commission=comm, net_amount=net, card=user["card_number"])
     await state.set_state(WithdrawStates.confirm)
 
+    btn_text = "⚡️ Avtomat Yechish (BRB 24/7)" if lang == "uz" else "⚡️ Авто Вывод (BRB 24/7)"
+    btn_cancel = "❌ Bekor qilish" if lang == "uz" else "❌ Отмена"
+
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⚡️ Avtomat Yechish (BRB 24/7)", callback_data="wd_go:auto"),
-                InlineKeyboardButton(text="❌ Bekor qilish", callback_data="wd_go:no")
+                InlineKeyboardButton(text=btn_text, callback_data="wd_go:auto"),
+                InlineKeyboardButton(text=btn_cancel, callback_data="wd_go:no")
             ]
         ]
     )
@@ -928,7 +1012,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
     if action == "no":
         await state.clear()
-        await callback.message.edit_text("❌ Pul yechish bekor qilindi.")
+        await callback.message.edit_text("❌ Bekor qilindi" if lang == "uz" else "❌ Отменено")
         await callback.answer()
         return
 
@@ -942,21 +1026,17 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
     user = await db_get_user(uid)
     now = utc_now_iso()
 
-    # 1. Yandex balansdan ayirish
+    # Yandex balansdan ayirish
     if user.get("yandex_driver_id"):
-        y_ok = await yandex_api.create_transaction(
+        await yandex_api.create_transaction(
             user["yandex_driver_id"],
             amount,
-            f"BRB 24/7 Avto-yechish karta {card}"
+            f"BRB 24/7 Yechish {card}"
         )
-        if not y_ok:
-            await callback.message.edit_text("❌ Yandex Pro balansidan mablag' yechishda xatolik yuz berdi!")
-            return
 
-    # 2. BRB 24/7 orqali kartaga to'lash
+    # BRB 24/7 orqali kartaga to'lash
     brb_res = await brb_api.send_payout(card, net_amount, user["id"])
 
-    # 3. Bazaga yozish va balansni yangilash
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET balance = balance - $1, updated_at = $2 WHERE id = $3", amount, now, user["id"])
@@ -975,21 +1055,88 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         conn.close()
 
     if brb_res["success"]:
-        await callback.message.edit_text(
+        msg = (
             f"✅ <b>Mablag' kartangizga muvaffaqiyatli o'tkazildi!</b>\n\n"
             f"💰 Summa: <b>{fmt_sum(net_amount)} so'm</b>\n"
             f"💳 Karta: <code>{card}</code>\n"
             f"🏦 Tizim: <b>BRB 24/7 Instant Pay</b>"
+        ) if lang == "uz" else (
+            f"✅ <b>Средства успешно переведены на карту!</b>\n\n"
+            f"💰 Сумма: <b>{fmt_sum(net_amount)} сум</b>\n"
+            f"💳 Карта: <code>{card}</code>\n"
+            f"🏦 Система: <b>BRB 24/7 Instant Pay</b>"
         )
     else:
-        # Agar BRB kaliti qo'yilmagan bo'lsa adminga ariza sifatida tushadi
-        await callback.message.edit_text(
+        msg = (
             f"✅ <b>Arizangiz qabul qilindi!</b>\n\n"
             f"Admin tekshirib, pulni kartangizga o'tkazadi.\n"
             f"💰 Summa: <b>{fmt_sum(net_amount)} so'm</b>"
+        ) if lang == "uz" else (
+            f"✅ <b>Заявка принята!</b>\n\n"
+            f"Администратор проверит и переведет средства.\n"
+            f"💰 Сумма: <b>{fmt_sum(net_amount)} сум</b>"
         )
 
+    await callback.message.edit_text(msg)
     await callback.answer()
+
+
+# --- ADMIN PANEL VA NOFAOL HAYDOVCHILAR ---
+
+@admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]))
+async def admin_open(message: Message) -> None:
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    lang = await get_lang(message.from_user.id)
+    await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>" if lang == "uz" else "🛠 <b>Панель Администратора:</b>", reply_markup=admin_main_kb(lang))
+
+
+@admin_router.message(F.text.in_(["🚫 Nofaol / Bloklanganlar", "🚫 Неактивные / Блок"]))
+async def admin_inactive_drivers(message: Message) -> None:
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    ten_days_ago = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            inactive = await conn.fetch("""
+                SELECT position, full_name, phone, car_model, car_number, last_activity 
+                FROM users 
+                WHERE is_registered = 1 AND (last_activity < $1 OR is_blocked = 1)
+                ORDER BY id DESC LIMIT 15
+            """, ten_days_ago)
+            inactive = [dict(r) for r in inactive]
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        inactive = conn.execute("""
+            SELECT position, full_name, phone, car_model, car_number, last_activity 
+            FROM users 
+            WHERE is_registered = 1 AND (last_activity < ? OR is_blocked = 1)
+            ORDER BY id DESC LIMIT 15
+        """, (ten_days_ago,)).fetchall()
+        conn.close()
+        inactive = [dict(r) for r in inactive]
+
+    if not inactive:
+        await message.answer("✅ Barcha haydovchilar faol, 10 kundan ortiq qolib ketganlar yo'q.")
+        return
+
+    text = f"🚫 <b>10+ kundan beri ishlamagan yoki bloklangan haydovchilar ({len(inactive)} ta):</b>\n\n"
+    for drv in inactive:
+        text += (
+            f"🆔 <code>{drv.get('position')}</code> | <b>{drv.get('full_name')}</b>\n"
+            f"📱 Tel: {drv.get('phone')} | 🚗 {drv.get('car_model')} ({drv.get('car_number')})\n"
+            f"📅 So'nggi faollik: {drv.get('last_activity', 'Nomaʼlum')[:10]}\n"
+            f"---------------------------\n"
+        )
+    await message.answer(text)
+
+
+@admin_router.message(F.text.in_(["⬅️ Asosiy menyu", "⬅️ Главное меню"]))
+async def back_to_user_menu(message: Message) -> None:
+    lang = await get_lang(message.from_user.id)
+    await message.answer("Asosiy menyu:" if lang == "uz" else "Главное меню:", reply_markup=user_main_kb(lang, message.from_user.id))
 
 
 # --- SOS / YORDAM HANDLERS ---
@@ -999,7 +1146,6 @@ async def sos_handler(message: Message) -> None:
     lang = await get_lang(message.from_user.id)
     await message.answer(t(lang, "sos_title"), reply_markup=sos_menu_kb(lang))
 
-
 @router.callback_query(F.data == "sos:loc")
 async def sos_location_flow(callback: CallbackQuery, state: FSMContext) -> None:
     lang = await get_lang(callback.from_user.id)
@@ -1007,7 +1153,6 @@ async def sos_location_flow(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.delete()
     await callback.message.answer(t(lang, "sos_ask_loc"), reply_markup=location_request_kb(lang))
     await callback.answer()
-
 
 @router.message(SOSStates.waiting_for_location, F.location)
 async def sos_receive_location(message: Message, state: FSMContext) -> None:
@@ -1018,13 +1163,14 @@ async def sos_receive_location(message: Message, state: FSMContext) -> None:
 
     lat = message.location.latitude
     lon = message.location.longitude
+    maps_url = f"https://maps.google.com/?q={lat},{lon}"
 
     alert = (
         f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / LOKATSIYA!</b>\n\n"
         f"👤 Haydovchi: <b>{user['full_name']}</b> (<code>{user['position']}</code>)\n"
         f"📱 Telefon: <code>{user['phone']}</code>\n"
         f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n\n"
-        f"📍 <a href='https://maps.google.com/?q={lat},{lon}'>Google Xaritada ko'rish</a>"
+        f"📍 <a href='{maps_url}'>Google Xaritada ko'rish</a>"
     )
 
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")]])
@@ -1038,35 +1184,31 @@ async def sos_receive_location(message: Message, state: FSMContext) -> None:
     await message.answer(t(lang, "sos_sent"), reply_markup=user_main_kb(lang, uid))
 
 
-# --- QOLGAN STANDART TUGMALAR ---
+# --- QOLGAN TUGMALAR ---
+
+@router.message(F.text.in_(["👥 Do'stni taklif qilish (Bonus)", "👥 Пригласить друга (Бонус)"]))
+async def referral_handler(message: Message) -> None:
+    uid = message.from_user.id
+    user = await db_get_user(uid)
+    if not user:
+        return
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
+    lang = user.get("language", "uz")
+    await message.answer(t(lang, "ref_text", link=ref_link), reply_markup=user_main_kb(lang, uid))
 
 @router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы"]))
 async def orders_handler(message: Message) -> None:
     lang = await get_lang(message.from_user.id)
-    await message.answer("📊 Bugungi barcha safarlaringiz Yandex Pro ilovasida hisoblanadi va balansingizda aks etadi.", reply_markup=user_main_kb(lang, message.from_user.id))
-
-@router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
-async def profile_handler(message: Message) -> None:
-    uid = message.from_user.id
-    user = await db_get_user(uid)
-    lang = await get_lang(uid)
-    if not user:
-        return
-    text = (
-        f"👤 <b>Haydovchi Profili:</b>\n\n"
-        f"🆔 POSITION: <code>{user['position']}</code>\n"
-        f"👤 Ism: <b>{user['full_name']}</b>\n"
-        f"📱 Telefon: <b>{user['phone']}</b>\n"
-        f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n"
-        f"💳 Karta: <code>{user['card_number']}</code>\n"
-        f"🚕 Yandex: <code>{user['yandex_driver_id'] or 'Ulanmagan'}</code>"
-    )
-    await message.answer(text, reply_markup=user_main_kb(lang, uid))
+    text = "📊 Bugungi barcha safarlaringiz Yandex Pro ilovasida real vaqtda hisoblanadi va balansingizda aks etadi." if lang == "uz" else "📊 Все сегодняшние поездки рассчитываются в Яндекс Про и отображаются на вашем балансе."
+    await message.answer(text, reply_markup=user_main_kb(lang, message.from_user.id))
 
 @router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа"]))
 async def group_handler(message: Message) -> None:
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchilar guruhiga qo'shilish", url=DRIVER_GROUP_LINK)]])
-    await message.answer(f"📢 <b>{BOT_NAME} Haydovchilar Guruhi:</b>", reply_markup=kb)
+    lang = await get_lang(message.from_user.id)
+    btn_text = "💬 Haydovchilar guruhiga qo'shilish" if lang == "uz" else "💬 Вступить в группу водителей"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_text, url=DRIVER_GROUP_LINK)]])
+    await message.answer(f"📢 <b>{BOT_NAME}</b>", reply_markup=kb)
 
 
 # ============================================================
