@@ -2,11 +2,14 @@ import os
 import re
 import math
 import html
+import io
 import asyncio
 import logging
 import sqlite3
 import aiohttp
 import asyncpg
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from pathlib import Path
 from typing import Any, Optional, Dict, List
 from datetime import datetime, timezone, timedelta
@@ -26,6 +29,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    BufferedInputFile,
 )
 
 # ============================================================
@@ -71,7 +75,6 @@ MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "30000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "2.0"))
 REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "30000"))
 
-# Helper Funksiyalar
 def fmt_sum(val: Any) -> str:
     try:
         return f"{int(float(val)):,}".replace(",", " ")
@@ -113,6 +116,7 @@ async def init_database():
                     yandex_driver_id TEXT,
                     referrer_id BIGINT,
                     total_orders INT DEFAULT 0,
+                    total_earnings NUMERIC DEFAULT 0,
                     last_activity TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -153,6 +157,7 @@ async def init_database():
                 yandex_driver_id TEXT,
                 referrer_id INTEGER,
                 total_orders INTEGER DEFAULT 0,
+                total_earnings REAL DEFAULT 0,
                 last_activity TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -207,27 +212,15 @@ async def db_upsert_start(telegram_id: int, username: str, referrer_id: Optional
             conn.commit()
             conn.close()
 
-async def db_get_top_drivers(limit: int = 10) -> List[dict]:
+async def db_get_all_registered_drivers() -> List[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT position, full_name, total_orders, balance 
-                FROM users 
-                WHERE is_registered = 1 
-                ORDER BY total_orders DESC, id ASC 
-                LIMIT $1
-            """, limit)
+            rows = await conn.fetch("SELECT * FROM users WHERE is_registered = 1 ORDER BY id ASC")
             return [dict(r) for r in rows]
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
-            SELECT position, full_name, total_orders, balance 
-            FROM users 
-            WHERE is_registered = 1 
-            ORDER BY total_orders DESC, id ASC 
-            LIMIT ?
-        """, (limit,)).fetchall()
+        rows = conn.execute("SELECT * FROM users WHERE is_registered = 1 ORDER BY id ASC").fetchall()
         conn.close()
         return [dict(r) for r in rows]
 
@@ -254,39 +247,51 @@ class YandexFleetAPI:
         }
 
     async def get_driver_by_phone(self, phone: str) -> Optional[dict]:
+        """Telefon raqam bo'yicha haydovchini aniq topish"""
         if not self.api_key or not self.park_id:
+            logger.warning("Yandex API kalitlari ko'rsatilmagan!")
             return None
+
+        clean_digits = re.sub(r"\D", "", phone)  # Masalan: 998913773200
         url = f"{self.base_url}/parks/driver-profiles/list"
-        clean_phone = phone.replace("+", "").strip()
+
+        # 1-usul: Yandex query orqali
         payload = {
             "query": {
                 "park": {"id": self.park_id},
-                "driver": {"phone": [clean_phone, f"+{clean_phone}"]}
+                "driver": {"phones": [f"+{clean_digits}", clean_digits]}
             },
-            "limit": 1
+            "limit": 10
         }
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=10) as resp:
+                async with session.post(url, headers=self.headers, json=payload, timeout=12) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         drivers = data.get("driver_profiles", [])
-                        return drivers[0] if drivers else None
+                        if drivers:
+                            return drivers[0]
+                    else:
+                        logger.error(f"Yandex API xatosi {resp.status}: {await resp.text()}")
         except Exception as e:
-            logger.error(f"Yandex API xatolik: {e}")
+            logger.error(f"Yandex ulanish xatosi: {e}")
+
+        # 2-usul: Agar maxsus filter ishlamasa, umumiy ro'yxatdan qidirish
+        all_drivers = await self.get_all_drivers(limit=500)
+        for d in all_drivers:
+            prof = d.get("driver_profile", {})
+            phones = prof.get("phones", [])
+            for p in phones:
+                if clean_digits in re.sub(r"\D", "", p):
+                    return d
         return None
 
     async def get_all_drivers(self, limit: int = 500) -> List[dict]:
-        """Taksoparkdagi barcha haydovchilarni tortib olish"""
         if not self.api_key or not self.park_id:
             return []
         url = f"{self.base_url}/parks/driver-profiles/list"
-        payload = {
-            "query": {
-                "park": {"id": self.park_id}
-            },
-            "limit": limit
-        }
+        payload = {"query": {"park": {"id": self.park_id}}, "limit": limit}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=self.headers, json=payload, timeout=20) as resp:
@@ -301,25 +306,17 @@ class YandexFleetAPI:
         if not self.api_key or not self.park_id:
             return None
         url = f"{self.base_url}/parks/driver-profiles/list"
-        payload = {
-            "query": {
-                "park": {"id": self.park_id},
-                "driver": {"id": [yandex_driver_id]}
-            },
-            "limit": 1
-        }
+        payload = {"query": {"park": {"id": self.park_id}, "driver": {"id": [yandex_driver_id]}}, "limit": 1}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=self.headers, json=payload, timeout=10) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         drivers = data.get("driver_profiles", [])
-                        if drivers:
-                            accounts = drivers[0].get("accounts", [])
-                            if accounts:
-                                return float(accounts[0].get("balance", 0.0))
+                        if drivers and drivers[0].get("accounts"):
+                            return float(drivers[0]["accounts"][0].get("balance", 0.0))
         except Exception as e:
-            logger.error(f"Yandex balans xatolik: {e}")
+            logger.error(f"Yandex balans olishda xato: {e}")
         return None
 
     async def create_transaction(self, yandex_driver_id: str, amount: float, description: str) -> bool:
@@ -338,7 +335,7 @@ class YandexFleetAPI:
                 async with session.post(url, headers=self.headers, json=payload, timeout=10) as resp:
                     return resp.status == 200
         except Exception as e:
-            logger.error(f"Yandex tranzaksiya xatolik: {e}")
+            logger.error(f"Yandex tranzaksiya xatosi: {e}")
             return False
 
 
@@ -379,6 +376,107 @@ brb_api = BRBPaymentAPI(BRB_API_URL, BRB_API_KEY, BRB_MERCHANT_ID)
 
 
 # ============================================================
+# EXCEL HISOBOT GENERATORI (.XLSX)
+# ============================================================
+
+async def generate_monthly_excel_report() -> bytes:
+    """Oylik to'liq hisobotni Excel (.xlsx) formatida yaratish"""
+    drivers = await db_get_all_registered_drivers()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Lochin Taxi Hisoboti"
+
+    # Sarlavhalar
+    headers = [
+        "№", "POSITION", "F.I.O (Haydovchi)", "Telefon Raqam", 
+        "Avtomobil", "Davlat Raqami", "Jami Buyurtmalar", 
+        "Jami Daromad (so'm)", "Ushlab qolingan Komissiya (so'm)", 
+        "Joriy Balans (so'm)", "Yandex ID"
+    ]
+
+    header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
+    header_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+    align_center = Alignment(horizontal="center", vertical="center")
+    align_left = Alignment(horizontal="left", vertical="center")
+    thin_border = Border(
+        left=Side(style='thin', color='D9D9D9'),
+        right=Side(style='thin', color='D9D9D9'),
+        top=Side(style='thin', color='D9D9D9'),
+        bottom=Side(style='thin', color='D9D9D9')
+    )
+
+    ws.append(headers)
+    for col_num, _ in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_num)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = align_center
+
+    total_orders_sum = 0
+    total_earnings_sum = 0
+    total_comm_sum = 0
+    total_balance_sum = 0
+
+    for idx, drv in enumerate(drivers, 1):
+        orders = drv.get("total_orders", 0)
+        bal = float(drv.get("balance", 0.0))
+        earnings = float(drv.get("total_earnings", 0.0)) or (bal * 1.2)  # Taxminiy yoki real daromad
+        comm = earnings * (COMMISSION_PERCENT / 100.0)
+
+        total_orders_sum += orders
+        total_earnings_sum += earnings
+        total_comm_sum += comm
+        total_balance_sum += bal
+
+        row_data = [
+            idx,
+            drv.get("position", "N/A"),
+            drv.get("full_name", "Nomaʼlum"),
+            drv.get("phone", ""),
+            drv.get("car_model", ""),
+            drv.get("car_number", ""),
+            orders,
+            int(earnings),
+            int(comm),
+            int(bal),
+            drv.get("yandex_driver_id", "Yo'q")
+        ]
+        ws.append(row_data)
+
+        row_idx = idx + 1
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_num)
+            cell.border = thin_border
+            if col_num in [1, 2, 6, 7]:
+                cell.alignment = align_center
+            else:
+                cell.alignment = align_left
+
+    # JAMI qatori
+    total_row = [
+        "JAMI", "", f"{len(drivers)} ta haydovchi", "", "", "",
+        total_orders_sum, int(total_earnings_sum), int(total_comm_sum), int(total_balance_sum), ""
+    ]
+    ws.append(total_row)
+    last_row = len(drivers) + 2
+    for col_num in range(1, len(headers) + 1):
+        cell = ws.cell(row=last_row, column=col_num)
+        cell.font = Font(name="Arial", size=11, bold=True)
+        cell.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+
+    # Ustun kengliklarini avtomat moslash
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+# ============================================================
 # MATNLAR (UZ / RU)
 # ============================================================
 
@@ -389,7 +487,7 @@ TEXTS = {
                    f"Tizimdan foydalanish uchun ro'yxatdan o'ting:",
         "register_btn": "📝 Ro'yxatdan o'tish",
         "reg_name": "👤 <b>Ism va familiyangizni kiriting:</b>\n\n<i>Misol: Alisher Qodirov</i>",
-        "reg_phone": "📱 <b>Telefon raqamingizni yuboring:</b>\n\nQuyidagi tugmani bosing yoki raqamingizni yozing (Format: <i>+998901234567</i>):",
+        "reg_phone": "📱 <b>Telefon raqamingizni yuboring:</b>\n\nQuyidagi <b>[📱 Telefon raqamni yuborish]</b> tugmasini bosing yoki raqamingizni yozing (Format: <i>+998901234567</i>):",
         "reg_card": "💳 <b>Plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n<i>Misol: 8600 1234 5678 9012 yoki 9860...</i>",
         "reg_car_model": "🚗 <b>Avtomobilingiz rusumini kiriting:</b>\n\n<i>Misol: Chevrolet Cobalt</i>",
         "reg_car_number": "🔢 <b>Avtomobil davlat raqamini kiriting:</b>\n\n<i>Misol: 01 A 123 AA</i>",
@@ -436,10 +534,11 @@ TEXTS = {
                     f"Har bir taklif qilgan faol haydovchingiz uchun: <b>{REFERRAL_BONUS:,} so'm</b> bonus olasiz!\n\n"
                     f"🔗 Sizning taklif havolangiz:\n<code>{{link}}</code>",
 
-        "sos_title": "🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\nKerakli bo'limni tanlang:",
+        "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n"
+                     f"📞 <b>Menejer telefoni:</b> {SUPPORT_PHONE_DISPLAY}\n\n"
+                     f"Kerakli bo'limni tanlang:",
         "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yo'lda qoldim)",
         "sos_btn_msg": "✍️ Menejerga xabar / Shikoyat yozish",
-        "sos_btn_call": "📞 Menejerga qo'ng'iroq",
         "sos_btn_chat": "💬 Menejer bilan shaxsiy chat",
         "sos_ask_loc": "📍 Pastdagi <b>[📍 Hozirgi joylashuvimni yuborish]</b> tugmasini bosing:",
         "sos_loc_btn": "📍 Hozirgi joylashuvimni yuborish",
@@ -452,7 +551,7 @@ TEXTS = {
                    f"Для начала работы пройдите регистрацию:",
         "register_btn": "📝 Регистрация",
         "reg_name": "👤 <b>Введите ваше имя и фамилию:</b>\n\n<i>Пример: Алишер Кадыров</i>",
-        "reg_phone": "📱 <b>Отправьте ваш номер телефона:</b>\n\nНажмите кнопку ниже или введите номер вручную (Формат: <i>+998901234567</i>):",
+        "reg_phone": "📱 <b>Отправьте ваш номер телефона:</b>\n\nНажмите кнопку <b>[📱 Отправить номер]</b> ниже или введите вручную (Формат: <i>+998901234567</i>):",
         "reg_card": "💳 <b>Введите 16-значный номер карты:</b>\n\n<i>Пример: 8600 1234 5678 9012</i>",
         "reg_car_model": "🚗 <b>Введите марку автомобиля:</b>\n\n<i>Пример: Chevrolet Cobalt</i>",
         "reg_car_number": "🔢 <b>Введите госномер автомобиля:</b>\n\n<i>Пример: 01 A 123 AA</i>",
@@ -499,10 +598,11 @@ TEXTS = {
                     f"За каждого активного водителя: <b>{REFERRAL_BONUS:,} сум</b> бонуса!\n\n"
                     f"🔗 Ваша реферальная ссылка:\n<code>{{link}}</code>",
 
-        "sos_title": "🆘 <b>Центр Экстренной Помощи</b>\n\nВыберите нужный раздел:",
+        "sos_title": f"🆘 <b>Центр Экстренной Помощи</b>\n\n"
+                     f"📞 <b>Телефон менеджера:</b> {SUPPORT_PHONE_DISPLAY}\n\n"
+                     f"Выберите нужный раздел:",
         "sos_btn_loc": "📍 Отправить локацию (ДТП / В пути)",
         "sos_btn_msg": "✍️ Написать менеджеру / Жалоба",
-        "sos_btn_call": "📞 Позвонить менеджеру",
         "sos_btn_chat": "💬 Личный чат с менеджером",
         "sos_ask_loc": "📍 Нажмите кнопку <b>[📍 Отправить мою локацию]</b> ниже:",
         "sos_loc_btn": "📍 Отправить мою локацию",
@@ -531,6 +631,7 @@ def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=t(lang, "menu_referral")), KeyboardButton(text=t(lang, "menu_top"))],
         [KeyboardButton(text=t(lang, "menu_group")), KeyboardButton(text=t(lang, "menu_sos"))],
     ]
+    # Faqat adminlarga ko'rsatish
     if uid in ADMIN_IDS:
         buttons.append([KeyboardButton(text=t(lang, "menu_admin"))])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -562,14 +663,13 @@ def sos_menu_kb(lang: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t(lang, "sos_btn_loc"), callback_data="sos:loc")],
             [InlineKeyboardButton(text=t(lang, "sos_btn_msg"), callback_data="sos:msg")],
             [InlineKeyboardButton(text=t(lang, "sos_btn_chat"), url=f"tg://user?id={MANAGER_TG_ID}")],
-            [InlineKeyboardButton(text=t(lang, "sos_btn_call"), url=f"tel:{SUPPORT_PHONE}")],
         ]
     )
 
 def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Statistika" if lang == "uz" else "📊 Статистика"), KeyboardButton(text="💸 Pul yechishlar" if lang == "uz" else "💸 Заявки на вывод")],
+            [KeyboardButton(text="📊 Statistika" if lang == "uz" else "📊 Статистика"), KeyboardButton(text="📥 Excel Hisobot" if lang == "uz" else "📥 Excel Отчет")],
             [KeyboardButton(text="🔄 Yandex Sinxronlash" if lang == "uz" else "🔄 Синхронизация Яндекс"), KeyboardButton(text="📢 Xabar tarqatish" if lang == "uz" else "📢 Рассылка")],
             [KeyboardButton(text="👥 Haydovchilar" if lang == "uz" else "👥 Водители"), KeyboardButton(text="🚫 Nofaollar" if lang == "uz" else "🚫 Неактивные")],
             [KeyboardButton(text="⬅️ Asosiy menyu" if lang == "uz" else "⬅️ Главное меню")],
@@ -583,8 +683,8 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
 # ============================================================
 
 class RegStates(StatesGroup):
-    name = State()
     phone = State()
+    name = State()
     card = State()
     car_model = State()
     car_number = State()
@@ -602,7 +702,7 @@ class AdminBroadcast(StatesGroup):
 
 
 # ============================================================
-# DISPATCHER
+# DISPATCHER & ROUTERS
 # ============================================================
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -671,7 +771,7 @@ async def lang_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-# --- REGISTRATION (YANDEX AVTO-MATCH BILAN) ---
+# --- REGISTRATION (YANDEX AVTO-MATCH) ---
 
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]))
 async def reg_start_flow(message: Message, state: FSMContext) -> None:
@@ -688,7 +788,7 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
         await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
 
-    phone = message.contact.phone_number if message.contact else message.text.strip().replace(" ", "").replace("-", "")
+    phone = message.contact.phone_number if message.contact else (message.text or "").strip().replace(" ", "").replace("-", "")
     if not phone.startswith("+"):
         phone = "+" + phone
 
@@ -698,17 +798,15 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
 
     await state.update_data(phone=phone)
 
-    # YANDEX'DA HAYDOVCHINI AVTOMAT QIDIRISH
+    # YANDEX PRO'DAN QIDIRISH
     y_driver = await yandex_api.get_driver_by_phone(phone)
     if y_driver:
-        # Haydovchi Yandexda topildi!
-        driver_prof = y_driver.get("driver_profile", {})
-        car_prof = y_driver.get("car", {})
-        
-        full_name = f"{driver_prof.get('last_name', '')} {driver_prof.get('first_name', '')}".strip() or "Haydovchi"
-        car_model = car_prof.get("brand_and_model", "Chevrolet")
-        car_number = car_prof.get("number", "Nomaʼlum")
-        y_id = driver_prof.get("id")
+        prof = y_driver.get("driver_profile", {})
+        car = y_driver.get("car", {})
+        full_name = f"{prof.get('last_name', '')} {prof.get('first_name', '')} {prof.get('middle_name', '')}".strip() or "Haydovchi"
+        car_model = car.get("brand_and_model", "Chevrolet Cobalt")
+        car_number = car.get("number", "Nomaʼlum")
+        y_id = prof.get("id")
 
         await state.update_data(
             full_name=full_name,
@@ -717,16 +815,22 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
             yandex_driver_id=y_id
         )
 
-        await message.answer(
+        found_msg = (
             f"✅ <b>Siz Yandex Pro tizimimizda topildingiz!</b>\n\n"
             f"👤 Ism: <b>{full_name}</b>\n"
-            f"🚗 Avto: <b>{car_model} ({car_number})</b>\n\n"
-            f"{t(lang, 'reg_card')}",
-            reply_markup=cancel_kb(lang)
+            f"🚗 Avtomobil: <b>{car_model} ({car_number})</b>\n\n"
+            f"{t(lang, 'reg_card')}"
+        ) if lang == "uz" else (
+            f"✅ <b>Вы найдены в системе Яндекс Про!</b>\n\n"
+            f"👤 Имя: <b>{full_name}</b>\n"
+            f"🚗 Автомобиль: <b>{car_model} ({car_number})</b>\n\n"
+            f"{t(lang, 'reg_card')}"
         )
+
+        await message.answer(found_msg, reply_markup=cancel_kb(lang))
         await state.set_state(RegStates.card)
     else:
-        # Yangi haydovchi (Yandexda hali yo'q)
+        # Yangi haydovchi
         await state.set_state(RegStates.name)
         await message.answer(t(lang, "reg_name"), reply_markup=cancel_kb(lang))
 
@@ -765,7 +869,6 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
     await state.update_data(card_number=card)
     data = await state.get_data()
 
-    # Agar Yandexdan ma'lumot olingan bo'lsa darhol yakunlash
     if data.get("yandex_driver_id"):
         await finish_registration(message, state, data)
     else:
@@ -898,13 +1001,14 @@ async def balance_handler(message: Message) -> None:
 async def top_drivers_real(message: Message) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
-    top_list = await db_get_top_drivers(10)
+    drivers = await db_get_all_registered_drivers()
+    drivers_sorted = sorted(drivers, key=lambda x: x.get("total_orders", 0), reverse=True)[:10]
 
     if lang == "uz":
         text = f"🏆 <b>{BOT_NAME} — Haftaning Eng Yaxshi Haydovchilari:</b>\n\n"
         medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        if top_list:
-            for idx, drv in enumerate(top_list):
+        if drivers_sorted:
+            for idx, drv in enumerate(drivers_sorted):
                 medal = medals[idx] if idx < len(medals) else f"{idx+1}."
                 text += f"{medal} <b>{drv.get('full_name', 'Haydovchi')}</b> (<code>{drv.get('position', 'N/A')}</code>) — <b>{drv.get('total_orders', 0)} ta zakaz</b>\n"
         else:
@@ -913,8 +1017,8 @@ async def top_drivers_real(message: Message) -> None:
     else:
         text = f"🏆 <b>{BOT_NAME} — ТОП Водителей Недели:</b>\n\n"
         medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        if top_list:
-            for idx, drv in enumerate(top_list):
+        if drivers_sorted:
+            for idx, drv in enumerate(drivers_sorted):
                 medal = medals[idx] if idx < len(medals) else f"{idx+1}."
                 text += f"{medal} <b>{drv.get('full_name', 'Водитель')}</b> (<code>{drv.get('position', 'N/A')}</code>) — <b>{drv.get('total_orders', 0)} заказов</b>\n"
         else:
@@ -1115,7 +1219,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
     await callback.answer()
 
 
-# --- ADMIN PANEL (450+ HAYDOVCHI SINXRONIZATSIYASI BILAN) ---
+# --- ADMIN PANEL & EXCEL HISOBOT ---
 
 @admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]))
 async def admin_open(message: Message) -> None:
@@ -1123,6 +1227,28 @@ async def admin_open(message: Message) -> None:
         return
     lang = await get_lang(message.from_user.id)
     await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>" if lang == "uz" else "🛠 <b>Панель Администратора:</b>", reply_markup=admin_main_kb(lang))
+
+
+@admin_router.message(F.text.in_(["📥 Excel Hisobot", "📥 Excel Отчет"]))
+async def admin_export_excel(message: Message) -> None:
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    status_msg = await message.answer("⏳ <i>Excel hisoboti tayyorlanmoqda...</i>")
+    try:
+        excel_bytes = await generate_monthly_excel_report()
+        now_str = datetime.now().strftime("%Y_%m_%d")
+        filename = f"Lochin_Taxi_Hisobot_{now_str}.xlsx"
+
+        file = BufferedInputFile(excel_bytes, filename=filename)
+        await message.answer_document(
+            document=file,
+            caption=f"📊 <b>Lochin Taxi Oylik Hisoboti ({now_str})</b>\n\nBarcha haydovchilar, buyurtmalar, komissiyalar va balanslar to'liq shakllantirildi."
+        )
+        await status_msg.delete()
+    except Exception as e:
+        logger.error(f"Excel yaratishda xato: {e}")
+        await status_msg.edit_text("❌ Excel hisobotini yaratishda xatolik yuz berdi.")
 
 
 @admin_router.message(F.text.in_(["🔄 Yandex Sinxronlash", "🔄 Синхронизация Яндекс"]))
@@ -1151,7 +1277,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
         if not phone.startswith("+"):
             phone = "+" + phone
 
-        full_name = f"{prof.get('last_name', '')} {prof.get('first_name', '')}".strip()
+        full_name = f"{prof.get('last_name', '')} {prof.get('first_name', '')} {prof.get('middle_name', '')}".strip()
         car_model = car.get("brand_and_model", "Chevrolet")
         car_number = car.get("number", "")
         y_id = prof.get("id")
@@ -1159,7 +1285,6 @@ async def admin_sync_all_drivers(message: Message) -> None:
         balance = float(accounts[0].get("balance", 0.0)) if accounts else 0.0
 
         count += 1
-        # DB ga yangilash yoki kiritish
         if db_pool:
             async with db_pool.acquire() as conn:
                 await conn.execute("""
@@ -1257,9 +1382,9 @@ async def sos_receive_location(message: Message, state: FSMContext) -> None:
 
     alert = (
         f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / LOKATSIYA!</b>\n\n"
-        f"👤 Haydovchi: <b>{user['full_name']}</b> (<code>{user['position']}</code>)\n"
-        f"📱 Telefon: <code>{user['phone']}</code>\n"
-        f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n\n"
+        f"👤 Haydovchi: <b>{user.get('full_name', 'Haydovchi')}</b> (<code>{user.get('position', 'N/A')}</code>)\n"
+        f"📱 Telefon: <code>{user.get('phone', 'Nomaʼlum')}</code>\n"
+        f"🚗 Mashina: <b>{user.get('car_model', '')} ({user.get('car_number', '')})</b>\n\n"
         f"📍 <a href='{maps_url}'>Google Xaritada ko'rish</a>"
     )
 
@@ -1302,6 +1427,35 @@ async def group_handler(message: Message) -> None:
 
 
 # ============================================================
+# OYLIK AVTOMATIK CRON HISOBOTI (HAR OYNING 1-SANASIDA)
+# ============================================================
+
+async def monthly_report_scheduler():
+    """Har oyning 1-sanasida avtomatik ravishda barcha adminlarga Excel yuborish"""
+    while True:
+        now = datetime.now()
+        # Agar yangi oyning 1-sanasi soat 08:00 bo'lsa
+        if now.day == 1 and now.hour == 8 and now.minute == 0:
+            try:
+                excel_bytes = await generate_monthly_excel_report()
+                filename = f"Lochin_Taxi_Oylik_Hisobot_{now.strftime('%Y_%m')}.xlsx"
+                file = BufferedInputFile(excel_bytes, filename=filename)
+                for adm in ADMIN_IDS:
+                    try:
+                        await bot.send_document(
+                            chat_id=adm,
+                            document=file,
+                            caption=f"🗓 <b>{now.strftime('%B %Y')} Oylik To'liq Hisoboti!</b>\n\nTaksoparkdagi barcha haydovchilar va umumiy hisob-kitoblar."
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(70)  # Bir daqiqadan ko'proq kutish
+            except Exception as e:
+                logger.error(f"Oylik avtomat hisobotda xato: {e}")
+        await asyncio.sleep(40)
+
+
+# ============================================================
 # VEB SERVER VA ISHGA TUSHIRISH
 # ============================================================
 
@@ -1324,6 +1478,10 @@ async def main() -> None:
     dp.include_router(admin_router)
     dp.include_router(router)
     await start_web()
+    
+    # Orqa fonda oylik hisobotni nazorat qilish
+    asyncio.create_task(monthly_report_scheduler())
+
     logger.info(f"🚕 {BOT_NAME} Enterprise tizimi ishga tushdi!")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
