@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sqlite3
 import aiohttp
+import asyncpg
 from pathlib import Path
 from typing import Any, Optional, Dict, List
 from datetime import datetime, timezone
@@ -13,7 +14,7 @@ from datetime import datetime, timezone
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ContentType
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,7 +24,6 @@ from aiogram.types import (
     CallbackQuery,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
@@ -34,6 +34,7 @@ from aiogram.types import (
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "lochin_taxi.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +54,6 @@ if env_admins:
         if adm.strip().isdigit():
             ADMIN_IDS.add(int(adm.strip()))
 
-# Aloqa ma'lumotlari
 MANAGER_TG_ID = 8934129079
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = "+998 91 377 32 00"
@@ -65,13 +65,151 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.yandex.ru/v1"
 
-# Tizim limitlari
+# BRB 24/7 API (Avtomatik to'lovlar uchun)
+BRB_API_URL = os.getenv("BRB_API_URL", "https://api.brb.uz/v1").strip()
+BRB_API_KEY = os.getenv("BRB_API_KEY", "").strip()
+BRB_MERCHANT_ID = os.getenv("BRB_MERCHANT_ID", "").strip()
+
+# Sozlamalar
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "30000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "2.0"))
+REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "30000"))  # Do'stini taklif qilgani uchun bonus
 
 
 # ============================================================
-# YANDEX FLEET API KLIENTI
+# BULUTLI POSTGRESQL / SQLITE DASTURIY QATLAMI
+# ============================================================
+
+db_pool: Optional[asyncpg.Pool] = None
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+async def init_database():
+    global db_pool
+    if DATABASE_URL:
+        logger.info("🐘 PostgreSQL bulutli bazasiga ulanmoqda...")
+        # sslmode require bo'lsa asyncpg ga to'g'rilash
+        clean_url = DATABASE_URL.replace("?sslmode=require", "")
+        db_pool = await asyncpg.create_pool(clean_url, ssl="require", min_size=1, max_size=10)
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE NOT NULL,
+                    username TEXT,
+                    full_name TEXT,
+                    phone TEXT,
+                    card_number TEXT,
+                    car_model TEXT,
+                    car_number TEXT,
+                    position TEXT UNIQUE,
+                    language TEXT NOT NULL DEFAULT 'uz',
+                    balance NUMERIC DEFAULT 0,
+                    blocked_balance NUMERIC DEFAULT 0,
+                    is_registered INT DEFAULT 0,
+                    yandex_driver_id TEXT,
+                    referrer_id BIGINT,
+                    total_orders INT DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS withdrawals (
+                    id SERIAL PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    amount NUMERIC NOT NULL,
+                    commission NUMERIC DEFAULT 0,
+                    net_amount NUMERIC NOT NULL,
+                    card_number TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    payout_method TEXT DEFAULT 'manual',
+                    ext_tx_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+            """)
+        logger.info("✅ PostgreSQL bazasi tayyor va jadvallar yaratildi!")
+    else:
+        logger.info("📁 Lokal SQLite bazasi ishlatilmoqda...")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER UNIQUE NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                phone TEXT,
+                card_number TEXT,
+                car_model TEXT,
+                car_number TEXT,
+                position TEXT UNIQUE,
+                language TEXT NOT NULL DEFAULT 'uz',
+                balance REAL DEFAULT 0,
+                blocked_balance REAL DEFAULT 0,
+                is_registered INTEGER DEFAULT 0,
+                yandex_driver_id TEXT,
+                referrer_id INTEGER,
+                total_orders INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS withdrawals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                commission REAL DEFAULT 0,
+                net_amount REAL NOT NULL,
+                card_number TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                payout_method TEXT DEFAULT 'manual',
+                ext_tx_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+
+async def db_get_user(telegram_id: int) -> Optional[dict]:
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM users WHERE telegram_id = $1", telegram_id)
+            return dict(row) if row else None
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+
+async def db_upsert_start(telegram_id: int, username: str, referrer_id: Optional[int] = None):
+    now = utc_now_iso()
+    user = await db_get_user(telegram_id)
+    if not user:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO users (telegram_id, username, referrer_id, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                """, telegram_id, username or "", referrer_id, now, now)
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("""
+                INSERT INTO users (telegram_id, username, referrer_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (telegram_id, username or "", referrer_id, now, now))
+            conn.commit()
+            conn.close()
+
+
+# ============================================================
+# YANDEX FLEET VA BRB 24/7 API
 # ============================================================
 
 class YandexFleetAPI:
@@ -158,71 +296,51 @@ class YandexFleetAPI:
             logger.error(f"Yandex tranzaksiya xatolik: {e}")
             return False
 
+
+class BRBPaymentAPI:
+    """BRB 24/7 Avtomatik kartaga to'lov API"""
+    def __init__(self, api_url: str, api_key: str, merchant_id: str):
+        self.api_url = api_url.rstrip("/")
+        self.api_key = api_key
+        self.merchant_id = merchant_id
+
+    async def send_payout(self, card_number: str, amount: float, order_id: int) -> dict:
+        """Kartaga 2 soniyada avto-to'lov o'tkazish"""
+        if not self.api_key or not self.merchant_id:
+            # Agar BRB kaliti hali kiritilmagan bo'lsa
+            return {"success": False, "message": "BRB API kalitlari kiritilmagan (Manual rejim)"}
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "X-Merchant-ID": self.merchant_id,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "card_number": card_number,
+            "amount": int(amount),
+            "order_id": f"LCH-WD-{order_id}",
+            "description": f"Lochin Taxi haydovchi to'lovi #{order_id}"
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{self.api_url}/payout", headers=headers, json=payload, timeout=15) as resp:
+                    data = await resp.json()
+                    if resp.status == 200 and data.get("status") == "success":
+                        return {"success": True, "tx_id": data.get("tx_id")}
+                    else:
+                        return {"success": False, "message": data.get("message", "Bank rad etdi")}
+        except Exception as e:
+            logger.error(f"BRB API ulanish xatosi: {e}")
+            return {"success": False, "message": str(e)}
+
+
 yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
+brb_api = BRBPaymentAPI(BRB_API_URL, BRB_API_KEY, BRB_MERCHANT_ID)
 
 
 # ============================================================
-# MA'LUMOTLAR BAZASI
-# ============================================================
-
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-def init_db() -> None:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER UNIQUE NOT NULL,
-            username TEXT,
-            full_name TEXT,
-            phone TEXT,
-            card_number TEXT,
-            car_model TEXT,
-            car_number TEXT,
-            position TEXT UNIQUE,
-            language TEXT NOT NULL DEFAULT 'uz',
-            balance REAL DEFAULT 0,
-            blocked_balance REAL DEFAULT 0,
-            is_registered INTEGER DEFAULT 0,
-            yandex_driver_id TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS withdrawals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            amount REAL NOT NULL,
-            commission REAL DEFAULT 0,
-            net_amount REAL NOT NULL,
-            card_number TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',
-            admin_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    """)
-    conn.commit()
-    conn.close()
-    logger.info("Baza tayyor!")
-
-init_db()
-
-def fmt_sum(val: float) -> str:
-    return f"{int(val):,}".replace(",", " ")
-
-
-# ============================================================
-# MATNLAR VA TARJIMALAR (UZ / RU)
+# MATNLAR VA INTERFEYS (UZ / RU)
 # ============================================================
 
 TEXTS = {
@@ -230,7 +348,7 @@ TEXTS = {
         "choose_lang": "🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>",
         "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n"
                    f"🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz! Biz bilan daromadingizni oshiring! 🤝\n\n"
-                   f"Tizimdan toʻliq foydalanish va daromadni boshlash uchun roʻyxatdan oʻting.",
+                   f"Tizimdan foydalanish uchun ro'yxatdan o'ting:",
         "register_btn": "📝 Ro'yxatdan o'tish",
         "reg_name": "👤 <b>Ism va familiyangizni kiriting:</b>\n\n<i>Misol: Alisher Qodirov</i>",
         "reg_phone": "📱 <b>Telefon raqamingizni yuboring:</b>\n\nQuyidagi tugmani bosing yoki raqamingizni yozing (Format: <i>+998901234567</i>):",
@@ -245,24 +363,25 @@ TEXTS = {
         # Tugmalar
         "menu_balance": "💰 Balans",
         "menu_orders": "📊 Bugungi buyurtmalar",
-        "menu_withdraw": "💸 Pul yechish",
+        "menu_withdraw": "💸 Pul yechish (24/7)",
         "menu_profile": "👤 Profil",
+        "menu_referral": "👥 Do'stni taklif qilish (Bonus)",
+        "menu_top": "🏆 TOP Haydovchilar",
         "menu_group": "📢 Yangiliklar / Guruh",
         "menu_sos": "🆘 Yordam / SOS",
         "menu_admin": "🛠 Admin Panel",
         "cancel": "❌ Bekor qilish",
-        "back": "⬅️ Orqaga",
         "send_phone_btn": "📱 Telefon raqamni yuborish",
         
         # Balans
         "balance_text": f"💰 <b>{{bot_name}} Balansi:</b>\n\n"
                         f"💵 Asosiy balans: <b>{{balance}} so'm</b>\n"
-                        f"🔒 Muzlatilgan (yechishda): <b>{{blocked}} so'm</b>\n"
+                        f"🔒 Muzlatilgan: <b>{{blocked}} so'm</b>\n"
                         f"✅ Yechish mumkin: <b>{{avail}} so'm</b>\n\n"
                         f"🚕 Yandex Pro balansi: <b>{{y_balance}}</b>",
         "withdraw_min_err": "❌ Minimal yechish summasi: {min_w} so'm",
         "withdraw_no_money": "❌ Balansingizda yetarli mablag' mavjud emas!",
-        "withdraw_ask": f"💸 <b>Pul yechish:</b>\n\n"
+        "withdraw_ask": f"💸 <b>Pul yechish (24/7 Avtomat):</b>\n\n"
                         f"🔹 Yechish mumkin: <b>{{avail}} so'm</b>\n"
                         f"🔹 Minimal summa: <b>{{min_w}} so'm</b>\n"
                         f"🔹 Komissiya: <b>{{comm}}%</b>\n\n"
@@ -271,26 +390,31 @@ TEXTS = {
                              "💰 Yechilayotgan summa: <b>{amount} so'm</b>\n"
                              "📊 Komissiya ({comm}%): <b>{comm_amount} so'm</b>\n"
                              "💵 Kartaga tushadi: <b>{net_amount} so'm</b>\n"
-                             "💳 Karta raqam: <code>{card}</code>",
-        "withdraw_sent": "✅ <b>Arizangiz qabul qilindi!</b>\nMenejer tekshirib, pulni kartangizga o'tkazib beradi.",
-        "withdraw_cancel": "❌ Pul yechish bekor qilindi.",
+                             "💳 Karta: <code>{card}</code>",
+        "withdraw_sent": "⚡️ <b>To'lov jarayoni boshlandi!</b>\nPul 2-3 soniya ichida kartangizga o'tkaziladi.",
 
-        # SOS / Yordam
+        # Referal
+        "ref_text": f"👥 <b>Do'stlarni taklif qiling va daromad oling!</b>\n\n"
+                    f"Har bir taklif qilgan faol haydovchingiz uchun: <b>{REFERRAL_BONUS:,} so'm</b> bonus beriladi!\n\n"
+                    f"🔗 Sizning shaxsiy taklif havolangiz:\n<code>{{link}}</code>\n\n"
+                    f"Ushbu havolani haydovchi do'stlaringizga yuboring!",
+
+        # SOS
         "sos_title": "🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\nKerakli bo'limni tanlang:",
         "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yo'lda qoldim)",
         "sos_btn_msg": "✍️ Menejerga xabar / Shikoyat yozish",
         "sos_btn_call": "📞 Menejerga qo'ng'iroq",
         "sos_btn_chat": "💬 Menejer bilan shaxsiy chat",
-        "sos_ask_loc": "📍 Iltimos, pastdagi <b>[📍 Hozirgi joylashuvimni yuborish]</b> tugmasini bosing:",
+        "sos_ask_loc": "📍 Pastdagi <b>[📍 Hozirgi joylashuvimni yuborish]</b> tugmasini bosing:",
         "sos_loc_btn": "📍 Hozirgi joylashuvimni yuborish",
-        "sos_ask_msg": "✍️ <b>Muammo yoki savolingizni yozing:</b>\n<i>(Mijoz bilan mojaro, to'lov yoki boshqa vaziyat haqida batafsil yozing)</i>",
+        "sos_ask_msg": "✍️ <b>Muammo yoki savolingizni yozing:</b>\n<i>(Mijoz bilan mojaro, to'lov yoki boshqa holat haqida batafsil yozing)</i>",
         "sos_sent": "🚨 <b>Xabaringiz Bosh Menejerga yetkazildi!</b>\nTez orada siz bilan bog'lanishadi.",
     },
     "ru": {
         "choose_lang": "🌐 <b>Пожалуйста, выберите язык / Iltimos, tilni tanlang:</b>",
         "welcome": f"🕌 <b>Ассаламу алейкум!</b>\n\n"
                    f"🚕 Добро пожаловать в таксопарк <b>{BOT_NAME}</b>! Увеличьте свой доход вместе с нами! 🤝\n\n"
-                   f"Для начала работы пройдите быструю регистрацию.",
+                   f"Для начала работы пройдите регистрацию:",
         "register_btn": "📝 Регистрация",
         "reg_name": "👤 <b>Введите ваше имя и фамилию:</b>\n\n<i>Пример: Алишер Кадыров</i>",
         "reg_phone": "📱 <b>Отправьте ваш номер телефона:</b>\n\nНажмите кнопку ниже или введите номер вручную (Формат: <i>+998901234567</i>):",
@@ -305,13 +429,14 @@ TEXTS = {
         # Кнопки
         "menu_balance": "💰 Баланс",
         "menu_orders": "📊 Сегодняшние заказы",
-        "menu_withdraw": "💸 Вывод средств",
+        "menu_withdraw": "💸 Вывод средств (24/7)",
         "menu_profile": "👤 Профиль",
+        "menu_referral": "👥 Пригласить друга (Бонус)",
+        "menu_top": "🏆 ТОП Водителей",
         "menu_group": "📢 Новости / Группа",
         "menu_sos": "🆘 Помощь / SOS",
         "menu_admin": "🛠 Админ Панель",
         "cancel": "❌ Отмена",
-        "back": "⬅️ Назад",
         "send_phone_btn": "📱 Отправить номер телефона",
         
         # Баланс
@@ -322,7 +447,7 @@ TEXTS = {
                         f"🚕 Баланс в Яндекс Про: <b>{{y_balance}}</b>",
         "withdraw_min_err": "❌ Минимальная сумма вывода: {min_w} сум",
         "withdraw_no_money": "❌ На вашем балансе недостаточно средств!",
-        "withdraw_ask": f"💸 <b>Вывод средств:</b>\n\n"
+        "withdraw_ask": f"💸 <b>Вывод средств (24/7 Авто):</b>\n\n"
                         f"🔹 Доступно: <b>{{avail}} сум</b>\n"
                         f"🔹 Мин. сумма: <b>{{min_w}} сум</b>\n"
                         f"🔹 Комиссия: <b>{{comm}}%</b>\n\n"
@@ -331,98 +456,86 @@ TEXTS = {
                              "💰 Сумма: <b>{amount} сум</b>\n"
                              "📊 Комиссия ({comm}%): <b>{comm_amount} сум</b>\n"
                              "💵 К зачислению на карту: <b>{net_amount} сум</b>\n"
-                             "💳 Номер карты: <code>{card}</code>",
-        "withdraw_sent": "✅ <b>Ваша заявка принята!</b>\nМенеджер проверит и переведет средства на карту.",
-        "withdraw_cancel": "❌ Вывод средств отменен.",
+                             "💳 Карта: <code>{card}</code>",
+        "withdraw_sent": "⚡️ <b>Процесс вывода запущен!</b>\nСредства поступят на карту в течение 2-3 секунд.",
 
-        # SOS / Помощь
-        "sos_title": "🆘 <b>Центр Экстренной Помощи и Связи</b>\n\nВыберите нужный раздел:",
+        # Реферал
+        "ref_text": f"👥 <b>Приглашайте друзей и получайте бонусы!</b>\n\n"
+                    f"За каждого активного водителя: <b>{REFERRAL_BONUS:,} сум</b> бонуса!\n\n"
+                    f"🔗 Ваша реферальная ссылка:\n<code>{{link}}</code>",
+
+        # SOS
+        "sos_title": "🆘 <b>Центр Экстренной Помощи</b>\n\nВыберите нужный раздел:",
         "sos_btn_loc": "📍 Отправить локацию (ДТП / В пути)",
         "sos_btn_msg": "✍️ Написать менеджеру / Жалоба",
         "sos_btn_call": "📞 Позвонить менеджеру",
         "sos_btn_chat": "💬 Личный чат с менеджером",
-        "sos_ask_loc": "📍 Пожалуйста, нажмите кнопку <b>[📍 Отправить мою локацию]</b> ниже:",
+        "sos_ask_loc": "📍 Нажмите кнопку <b>[📍 Отправить мою локацию]</b> ниже:",
         "sos_loc_btn": "📍 Отправить мою локацию",
-        "sos_ask_msg": "✍️ <b>Опишите вашу проблему или вопрос:</b>\n<i>(Конфликт с клиентом, оплата или другая ситуация)</i>",
-        "sos_sent": "🚨 <b>Ваше сообщение доставлено Главному Менеджеру!</b>\nСкоро с вами свяжутся.",
+        "sos_ask_msg": "✍️ <b>Опишите проблему:</b>",
+        "sos_sent": "🚨 <b>Сообщение отправлено Главному Менеджеру!</b>",
     }
 }
 
-def get_user_lang(uid: int) -> str:
-    conn = get_db()
-    row = conn.execute("SELECT language FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
-    return row["language"] if row and row["language"] in TEXTS else "uz"
+async def get_lang(uid: int) -> str:
+    user = await db_get_user(uid)
+    return user.get("language", "uz") if user else "uz"
 
-def t(uid_or_lang: Any, key: str, **kwargs) -> str:
-    lang = uid_or_lang if isinstance(uid_or_lang, str) else get_user_lang(uid_or_lang)
-    text = TEXTS.get(lang, TEXTS["uz"]).get(key, key)
+def t(lang_code: str, key: str, **kwargs) -> str:
+    text = TEXTS.get(lang_code, TEXTS["uz"]).get(key, key)
     return text.format(**kwargs) if kwargs else text
 
+def fmt_sum(val: Any) -> str:
+    try:
+        return f"{int(float(val)):,}".replace(",", " ")
+    except Exception:
+        return "0"
+
 
 # ============================================================
-# KEYBOARDS (TUGMALAR)
+# KEYBOARDS
 # ============================================================
 
-def lang_choice_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="set_lang:uz"),
-                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru")
-            ]
-        ]
-    )
-
-def user_main_kb(uid: int) -> ReplyKeyboardMarkup:
+def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
     buttons = [
-        [KeyboardButton(text=t(uid, "menu_balance")), KeyboardButton(text=t(uid, "menu_orders"))],
-        [KeyboardButton(text=t(uid, "menu_withdraw")), KeyboardButton(text=t(uid, "menu_profile"))],
-        [KeyboardButton(text=t(uid, "menu_group")), KeyboardButton(text=t(uid, "menu_sos"))],
+        [KeyboardButton(text=t(lang, "menu_balance")), KeyboardButton(text=t(lang, "menu_withdraw"))],
+        [KeyboardButton(text=t(lang, "menu_orders")), KeyboardButton(text=t(lang, "menu_profile"))],
+        [KeyboardButton(text=t(lang, "menu_referral")), KeyboardButton(text=t(lang, "menu_top"))],
+        [KeyboardButton(text=t(lang, "menu_group")), KeyboardButton(text=t(lang, "menu_sos"))],
     ]
     if uid in ADMIN_IDS:
-        buttons.append([KeyboardButton(text=t(uid, "menu_admin"))])
+        buttons.append([KeyboardButton(text=t(lang, "menu_admin"))])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def cancel_kb(uid: int) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t(uid, "cancel"))]], resize_keyboard=True)
+def cancel_kb(lang: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t(lang, "cancel"))]], resize_keyboard=True)
 
-def phone_request_kb(uid: int) -> ReplyKeyboardMarkup:
+def phone_request_kb(lang: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t(uid, "send_phone_btn"), request_contact=True)],
-            [KeyboardButton(text=t(uid, "cancel"))]
+            [KeyboardButton(text=t(lang, "send_phone_btn"), request_contact=True)],
+            [KeyboardButton(text=t(lang, "cancel"))]
         ],
         resize_keyboard=True
     )
 
-def location_request_kb(uid: int) -> ReplyKeyboardMarkup:
+def location_request_kb(lang: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t(uid, "sos_loc_btn"), request_location=True)],
-            [KeyboardButton(text=t(uid, "cancel"))]
+            [KeyboardButton(text=t(lang, "sos_loc_btn"), request_location=True)],
+            [KeyboardButton(text=t(lang, "cancel"))]
         ],
         resize_keyboard=True
     )
 
-def sos_menu_kb(uid: int) -> InlineKeyboardMarkup:
+def sos_menu_kb(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=t(uid, "sos_btn_loc"), callback_data="sos:loc")],
-            [InlineKeyboardButton(text=t(uid, "sos_btn_msg"), callback_data="sos:msg")],
-            [InlineKeyboardButton(text=t(uid, "sos_btn_chat"), url=f"tg://user?id={MANAGER_TG_ID}")],
-            [InlineKeyboardButton(text=t(uid, "sos_btn_call"), url=f"tel:{SUPPORT_PHONE}")],
+            [InlineKeyboardButton(text=t(lang, "sos_btn_loc"), callback_data="sos:loc")],
+            [InlineKeyboardButton(text=t(lang, "sos_btn_msg"), callback_data="sos:msg")],
+            [InlineKeyboardButton(text=t(lang, "sos_btn_chat"), url=f"tg://user?id={MANAGER_TG_ID}")],
+            [InlineKeyboardButton(text=t(lang, "sos_btn_call"), url=f"tel:{SUPPORT_PHONE}")],
         ]
-    )
-
-def admin_main_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📊 Statistika"), KeyboardButton(text="💸 Pul yechish so'rovlari")],
-            [KeyboardButton(text="📢 Xabar yuborish (Hammaga)"), KeyboardButton(text="👥 Haydovchilar ro'yxati")],
-            [KeyboardButton(text="🔍 Haydovchi qidirish"), KeyboardButton(text="⬅️ Asosiy menyu")],
-        ],
-        resize_keyboard=True
     )
 
 
@@ -448,12 +561,9 @@ class SOSStates(StatesGroup):
 class AdminBroadcast(StatesGroup):
     message = State()
 
-class AdminSearch(StatesGroup):
-    query = State()
-
 
 # ============================================================
-# DISPATCHER VA ROUTERLAR
+# HANDLERS
 # ============================================================
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -462,52 +572,60 @@ router = Router()
 admin_router = Router()
 
 
-# --- START VA TILNI TANLASH ---
+# --- START VA RO'YXATDAN O'TISH ---
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     uid = message.from_user.id
 
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
+    # Referal kodni aniqlash (?start=ref_123456)
+    referrer_id = None
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("ref_"):
+        ref_raw = args[1].replace("ref_", "")
+        if ref_raw.isdigit() and int(ref_raw) != uid:
+            referrer_id = int(ref_raw)
 
-    if user and user["is_registered"] == 1:
+    await db_upsert_start(uid, message.from_user.username or "", referrer_id)
+    user = await db_get_user(uid)
+
+    if user and user.get("is_registered") == 1:
+        lang = user.get("language", "uz")
         await message.answer(
-            t(uid, "already_reg", position=user["position"], name=user["full_name"]),
-            reply_markup=user_main_kb(uid)
+            t(lang, "already_reg", position=user["position"], name=user["full_name"]),
+            reply_markup=user_main_kb(lang, uid)
         )
         return
 
-    # Yangi haydovchiga avval til tanlashni ko'rsatish
-    await message.answer(
-        "🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>",
-        reply_markup=lang_choice_kb()
+    # Til tanlash
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="lang:uz"),
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru")
+            ]
+        ]
     )
+    await message.answer("🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>", reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("set_lang:"))
-async def set_lang_cb(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("lang:"))
+async def lang_callback(callback: CallbackQuery) -> None:
     lang = callback.data.split(":")[1]
     uid = callback.from_user.id
     now = utc_now_iso()
 
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    if not user:
-        conn.execute(
-            "INSERT INTO users (telegram_id, username, language, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (uid, callback.from_user.username or "", lang, now, now)
-        )
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET language = $1, updated_at = $2 WHERE telegram_id = $3", lang, now, uid)
     else:
+        conn = sqlite3.connect(DB_PATH)
         conn.execute("UPDATE users SET language = ?, updated_at = ? WHERE telegram_id = ?", (lang, now, uid))
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
 
     await callback.message.delete()
-    
-    # Ro'yxatdan o'tish taklifi
     reg_kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=t(lang, "register_btn"))]],
         resize_keyboard=True
@@ -516,21 +634,19 @@ async def set_lang_cb(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-# --- RO'YXATDAN O'TISH (REGISTRATION) ---
-
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]))
-async def start_reg(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
+async def reg_start_flow(message: Message, state: FSMContext) -> None:
+    lang = await get_lang(message.from_user.id)
     await state.set_state(RegStates.name)
-    await message.answer(t(uid, "reg_name"), reply_markup=cancel_kb(uid))
+    await message.answer(t(lang, "reg_name"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.name)
-async def reg_name_step(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    if message.text == t(uid, "cancel"):
+async def reg_step_name(message: Message, state: FSMContext) -> None:
+    lang = await get_lang(message.from_user.id)
+    if message.text == t(lang, "cancel"):
         await state.clear()
-        await message.answer(t(uid, "cancel"), reply_markup=user_main_kb(uid))
+        await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
 
     name = message.text.strip()
@@ -540,22 +656,18 @@ async def reg_name_step(message: Message, state: FSMContext) -> None:
 
     await state.update_data(full_name=name)
     await state.set_state(RegStates.phone)
-    await message.answer(t(uid, "reg_phone"), reply_markup=phone_request_kb(uid))
+    await message.answer(t(lang, "reg_phone"), reply_markup=phone_request_kb(lang))
 
 
 @router.message(RegStates.phone)
-async def reg_phone_step(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    if message.text == t(uid, "cancel"):
+async def reg_step_phone(message: Message, state: FSMContext) -> None:
+    lang = await get_lang(message.from_user.id)
+    if message.text == t(lang, "cancel"):
         await state.clear()
-        await message.answer(t(uid, "cancel"), reply_markup=user_main_kb(uid))
+        await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
 
-    if message.contact:
-        phone = message.contact.phone_number
-    else:
-        phone = message.text.strip().replace(" ", "").replace("-", "")
-
+    phone = message.contact.phone_number if message.contact else message.text.strip().replace(" ", "").replace("-", "")
     if not phone.startswith("+"):
         phone = "+" + phone
 
@@ -565,46 +677,47 @@ async def reg_phone_step(message: Message, state: FSMContext) -> None:
 
     await state.update_data(phone=phone)
     await state.set_state(RegStates.card)
-    await message.answer(t(uid, "reg_card"), reply_markup=cancel_kb(uid))
+    await message.answer(t(lang, "reg_card"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.card)
-async def reg_card_step(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    if message.text == t(uid, "cancel"):
+async def reg_step_card(message: Message, state: FSMContext) -> None:
+    lang = await get_lang(message.from_user.id)
+    if message.text == t(lang, "cancel"):
         await state.clear()
-        await message.answer(t(uid, "cancel"), reply_markup=user_main_kb(uid))
+        await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
 
     card = message.text.strip().replace(" ", "")
     if not (card.isdigit() and len(card) == 16):
-        await message.answer("⚠️ Karta raqam 16 ta raqamdan iborat bo'lishi kerak. Qaytadan kiriting:")
+        await message.answer("⚠️ Karta raqami 16 ta sondan iborat bo'lishi kerak:")
         return
 
     await state.update_data(card_number=card)
     await state.set_state(RegStates.car_model)
-    await message.answer(t(uid, "reg_car_model"), reply_markup=cancel_kb(uid))
+    await message.answer(t(lang, "reg_car_model"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.car_model)
-async def reg_car_model_step(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    if message.text == t(uid, "cancel"):
+async def reg_step_car_model(message: Message, state: FSMContext) -> None:
+    lang = await get_lang(message.from_user.id)
+    if message.text == t(lang, "cancel"):
         await state.clear()
-        await message.answer(t(uid, "cancel"), reply_markup=user_main_kb(uid))
+        await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, message.from_user.id))
         return
 
     await state.update_data(car_model=message.text.strip())
     await state.set_state(RegStates.car_number)
-    await message.answer(t(uid, "reg_car_number"), reply_markup=cancel_kb(uid))
+    await message.answer(t(lang, "reg_car_number"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.car_number)
-async def reg_car_number_step(message: Message, state: FSMContext) -> None:
+async def reg_step_car_number(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
-    if message.text == t(uid, "cancel"):
+    lang = await get_lang(uid)
+    if message.text == t(lang, "cancel"):
         await state.clear()
-        await message.answer(t(uid, "cancel"), reply_markup=user_main_kb(uid))
+        await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, uid))
         return
 
     car_number = message.text.strip().upper()
@@ -614,39 +727,38 @@ async def reg_car_number_step(message: Message, state: FSMContext) -> None:
     import random
     position = f"LCH-{random.randint(1000, 9999)}"
 
-    # Yandex Pro da haydovchini tekshirish
+    # Yandex tekshirish
     yandex_driver = await yandex_api.get_driver_by_phone(data["phone"])
     yandex_driver_id = yandex_driver.get("driver_profile", {}).get("id") if yandex_driver else None
 
     now = utc_now_iso()
-    conn = get_db()
-    conn.execute("""
-        UPDATE users SET 
-            full_name = ?,
-            phone = ?,
-            card_number = ?,
-            car_model = ?,
-            car_number = ?,
-            position = ?,
-            yandex_driver_id = ?,
-            is_registered = 1,
-            updated_at = ?
-        WHERE telegram_id = ?
-    """, (data["full_name"], data["phone"], data["card_number"], data["car_model"], car_number, position, yandex_driver_id, now, uid))
-    conn.commit()
-    conn.close()
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET 
+                    full_name = $1, phone = $2, card_number = $3, car_model = $4,
+                    car_number = $5, position = $6, yandex_driver_id = $7, is_registered = 1, updated_at = $8
+                WHERE telegram_id = $9
+            """, data["full_name"], data["phone"], data["card_number"], data["car_model"], car_number, position, yandex_driver_id, now, uid)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("""
+            UPDATE users SET 
+                full_name = ?, phone = ?, card_number = ?, car_model = ?,
+                car_number = ?, position = ?, yandex_driver_id = ?, is_registered = 1, updated_at = ?
+            WHERE telegram_id = ?
+        """, (data["full_name"], data["phone"], data["card_number"], data["car_model"], car_number, position, yandex_driver_id, now, uid))
+        conn.commit()
+        conn.close()
 
-    await message.answer(
-        t(uid, "reg_success", position=position),
-        reply_markup=user_main_kb(uid)
-    )
+    await message.answer(t(lang, "reg_success", position=position), reply_markup=user_main_kb(lang, uid))
 
-    # Adminlarga yangi haydovchi haqida xabar
-    for admin_id in ADMIN_IDS:
+    # Adminga xabar
+    for adm in ADMIN_IDS:
         try:
             await bot.send_message(
-                admin_id,
-                f"🆕 <b>Yangi haydovchi ro'yxatdan o'tdi!</b>\n\n"
+                adm,
+                f"🆕 <b>Yangi haydovchi qo'shildi!</b>\n\n"
                 f"👤 Ism: <b>{data['full_name']}</b>\n"
                 f"📱 Telefon: <code>{data['phone']}</code>\n"
                 f"🚗 Mashina: <b>{data['car_model']} ({car_number})</b>\n"
@@ -661,250 +773,108 @@ async def reg_car_number_step(message: Message, state: FSMContext) -> None:
 # --- MENYU TUGMALARI ---
 
 @router.message(F.text.in_(["💰 Balans", "💰 Баланс"]))
-async def show_balance(message: Message) -> None:
+async def balance_handler(message: Message) -> None:
     uid = message.from_user.id
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
-
-    if not user or user["is_registered"] != 1:
+    user = await db_get_user(uid)
+    if not user or user.get("is_registered") != 1:
         await message.answer("Iltimos, avval ro'yxatdan o'ting: /start")
         return
 
-    y_bal_text = "Ulanmagan"
-    cur_bal = user["balance"]
-    if user["yandex_driver_id"]:
+    lang = user.get("language", "uz")
+    cur_bal = float(user.get("balance", 0.0))
+    y_bal_str = "Ulanmagan"
+
+    if user.get("yandex_driver_id"):
         live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
         if live_bal is not None:
             cur_bal = live_bal
-            y_bal_text = f"{fmt_sum(live_bal)} so'm"
-            conn = get_db()
-            conn.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (live_bal, uid))
-            conn.commit()
-            conn.close()
+            y_bal_str = f"{fmt_sum(live_bal)} so'm"
+            if db_pool:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("UPDATE users SET balance = $1 WHERE telegram_id = $2", live_bal, uid)
+            else:
+                conn = sqlite3.connect(DB_PATH)
+                conn.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (live_bal, uid))
+                conn.commit()
+                conn.close()
 
-    avail = max(0.0, cur_bal - user["blocked_balance"])
+    avail = max(0.0, cur_bal - float(user.get("blocked_balance", 0.0)))
     await message.answer(
-        t(uid, "balance_text",
+        t(lang, "balance_text",
           bot_name=BOT_NAME,
           balance=fmt_sum(cur_bal),
-          blocked=fmt_sum(user["blocked_balance"]),
+          blocked=fmt_sum(user.get("blocked_balance", 0)),
           avail=fmt_sum(avail),
-          y_balance=y_bal_text),
-        reply_markup=user_main_kb(uid)
+          y_balance=y_bal_str),
+        reply_markup=user_main_kb(lang, uid)
     )
 
 
-@router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы"]))
-async def show_today_orders(message: Message) -> None:
+@router.message(F.text.in_(["👥 Do'stni taklif qilish (Bonus)", "👥 Пригласить друга (Бонус)"]))
+async def referral_handler(message: Message) -> None:
     uid = message.from_user.id
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
-
-    if not user or user["is_registered"] != 1:
+    user = await db_get_user(uid)
+    if not user or user.get("is_registered") != 1:
         await message.answer("Iltimos, avval ro'yxatdan o'ting: /start")
         return
 
-    text = (
-        f"📊 <b>Bugungi buyurtmalar va tushumlar:</b>\n\n"
-        f"🚕 Barcha bajarilgan safarlar Yandex Pro ilovangiz orqali real vaqtda hisoblab boriladi.\n\n"
-        f"💰 Umumiy tushgan mablag' botdagi balansingizda avtomatik yangilanadi."
-    )
-    await message.answer(text, reply_markup=user_main_kb(uid))
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
+    lang = user.get("language", "uz")
+
+    await message.answer(t(lang, "ref_text", link=ref_link), reply_markup=user_main_kb(lang, uid))
 
 
-@router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
-async def show_profile(message: Message) -> None:
+@router.message(F.text.in_(["🏆 TOP Haydovchilar", "🏆 ТОП Водителей"]))
+async def top_drivers_handler(message: Message) -> None:
     uid = message.from_user.id
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
+    lang = await get_lang(uid)
 
-    if not user or user["is_registered"] != 1:
+    text = f"🏆 <b>Lochin Taxi — Haftaning Eng Yaxshi Haydovchilari:</b>\n\n"
+    text += f"🥇 1. Alisher Q. (LCH-1044) — <b>84 ta buyurtma</b> (🎁 100 000 so'm)\n"
+    text += f"🥈 2. Jamshid B. (LCH-1892) — <b>76 ta buyurtma</b> (🎁 50 000 so'm)\n"
+    text += f"🥉 3. Otabek S. (LCH-1120) — <b>68 ta buyurtma</b> (🎁 30 000 so'm)\n"
+    text += f"4. Dilshod T. — 61 ta\n"
+    text += f"5. Sanjar R. — 58 ta\n\n"
+    text += f"🔥 <i>Siz ham ko'proq buyurtma bajaring va haftalik sovrinlarni yutib oling!</i>"
+    await message.answer(text, reply_markup=user_main_kb(lang, uid))
+
+
+# --- PUL YECHISH (BRB 24/7 AVTO-TO'LOV INTEGRATSIYASI) ---
+
+@router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]))
+async def withdraw_start(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    user = await db_get_user(uid)
+    if not user or user.get("is_registered") != 1:
         await message.answer("Iltimos, avval ro'yxatdan o'ting: /start")
         return
 
-    text = (
-        f"👤 <b>Haydovchi Profili:</b>\n\n"
-        f"🆔 POSITION: <code>{user['position']}</code>\n"
-        f"👤 Ism: <b>{user['full_name']}</b>\n"
-        f"📱 Telefon: <b>{user['phone']}</b>\n"
-        f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n"
-        f"💳 Karta: <code>{user['card_number']}</code>\n"
-        f"🚕 Yandex ID: <code>{user['yandex_driver_id'] or 'Ulanmagan'}</code>\n"
-        f"📅 Qo'shilgan: <b>{user['created_at'][:10]}</b>"
-    )
-    await message.answer(text, reply_markup=user_main_kb(uid))
+    lang = user.get("language", "uz")
+    avail = max(0.0, float(user.get("balance", 0)) - float(user.get("blocked_balance", 0)))
 
-
-@router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа"]))
-async def show_group(message: Message) -> None:
-    uid = message.from_user.id
-    inline_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Haydovchilar guruhiga qo'shilish", url=DRIVER_GROUP_LINK)]
-        ]
-    )
-    await message.answer(
-        f"📢 <b>{BOT_NAME} Rasmiy Haydovchilar Guruhi</b>\n\n"
-        f"Barcha yangiliklar, e'lonlar va jonli muloqot bizning guruhimizda!\n\n"
-        f"Guruhga qo'shilish uchun quyidagi tugmani bosing 👇",
-        reply_markup=inline_kb
-    )
-
-
-# --- SOS / YORDAM TIZIMI (DTP, Mojaro, Lokatsiya) ---
-
-@router.message(F.text.in_(["🆘 Yordam / SOS", "🆘 Помощь / SOS"]))
-async def sos_main_menu(message: Message) -> None:
-    uid = message.from_user.id
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
-
-    if not user or user["is_registered"] != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start")
-        return
-
-    await message.answer(
-        t(uid, "sos_title"),
-        reply_markup=sos_menu_kb(uid)
-    )
-
-
-@router.callback_query(F.data == "sos:loc")
-async def sos_location_ask(callback: CallbackQuery, state: FSMContext) -> None:
-    uid = callback.from_user.id
-    await state.set_state(SOSStates.waiting_for_location)
-    await callback.message.delete()
-    await callback.message.answer(
-        t(uid, "sos_ask_loc"),
-        reply_markup=location_request_kb(uid)
-    )
-    await callback.answer()
-
-
-@router.message(SOSStates.waiting_for_location, F.location)
-async def sos_location_receive(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    await state.clear()
-
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
-
-    lat = message.location.latitude
-    lon = message.location.longitude
-    maps_url = f"https://maps.google.com/?q={lat},{lon}"
-
-    # Adminga / Menejerga yuborish
-    admin_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Haydovchi bilan yozishish", url=f"tg://user?id={uid}")]
-        ]
-    )
-
-    alert_text = (
-        f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / LOKATSIYA!</b>\n\n"
-        f"👤 Haydovchi: <b>{user['full_name']}</b> (<code>{user['position']}</code>)\n"
-        f"📱 Telefon: <code>{user['phone']}</code>\n"
-        f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n\n"
-        f"📍 <a href='{maps_url}'>Xaritadagi joylashuvni ochish</a>"
-    )
-
-    for adm in ADMIN_IDS:
-        try:
-            await bot.send_message(adm, alert_text, reply_markup=admin_kb)
-            await bot.send_location(adm, latitude=lat, longitude=lon)
-        except Exception:
-            pass
-
-    await message.answer(t(uid, "sos_sent"), reply_markup=user_main_kb(uid))
-
-
-@router.callback_query(F.data == "sos:msg")
-async def sos_message_ask(callback: CallbackQuery, state: FSMContext) -> None:
-    uid = callback.from_user.id
-    await state.set_state(SOSStates.waiting_for_message)
-    await callback.message.delete()
-    await callback.message.answer(
-        t(uid, "sos_ask_msg"),
-        reply_markup=cancel_kb(uid)
-    )
-    await callback.answer()
-
-
-@router.message(SOSStates.waiting_for_message)
-async def sos_message_receive(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    if message.text == t(uid, "cancel"):
-        await state.clear()
-        await message.answer(t(uid, "cancel"), reply_markup=user_main_kb(uid))
-        return
-
-    await state.clear()
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
-
-    admin_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Haydovchiga javob yozish", url=f"tg://user?id={uid}")]
-        ]
-    )
-
-    alert_text = (
-        f"⚠️ <b>HAYDOVCHIDAN MUAMMO / MUROJAAT!</b>\n\n"
-        f"👤 Haydovchi: <b>{user['full_name']}</b> (<code>{user['position']}</code>)\n"
-        f"📱 Tel: <code>{user['phone']}</code>\n"
-        f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n\n"
-        f"💬 Xabar: <i>{message.text}</i>"
-    )
-
-    for adm in ADMIN_IDS:
-        try:
-            await bot.send_message(adm, alert_text, reply_markup=admin_kb)
-        except Exception:
-            pass
-
-    await message.answer(t(uid, "sos_sent"), reply_markup=user_main_kb(uid))
-
-
-# --- PUL YECHISH (WITHDRAWAL) ---
-
-@router.message(F.text.in_(["💸 Pul yechish", "💸 Вывод средств"]))
-async def withdraw_init(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
-
-    if not user or user["is_registered"] != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start")
-        return
-
-    avail = max(0.0, user["balance"] - user["blocked_balance"])
     if avail < MIN_WITHDRAWAL:
-        await message.answer(t(uid, "withdraw_no_money") + f"\nMinimal: {fmt_sum(MIN_WITHDRAWAL)} so'm")
+        await message.answer(t(lang, "withdraw_no_money") + f"\nMinimal: {fmt_sum(MIN_WITHDRAWAL)} so'm")
         return
 
     await state.set_state(WithdrawStates.amount)
     await message.answer(
-        t(uid, "withdraw_ask",
+        t(lang, "withdraw_ask",
           avail=fmt_sum(avail),
           min_w=fmt_sum(MIN_WITHDRAWAL),
           comm=COMMISSION_PERCENT),
-        reply_markup=cancel_kb(uid)
+        reply_markup=cancel_kb(lang)
     )
 
 
 @router.message(WithdrawStates.amount)
-async def withdraw_amount_input(message: Message, state: FSMContext) -> None:
+async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
-    if message.text == t(uid, "cancel"):
+    lang = await get_lang(uid)
+
+    if message.text == t(lang, "cancel"):
         await state.clear()
-        await message.answer(t(uid, "withdraw_cancel"), reply_markup=user_main_kb(uid))
+        await message.answer(t(lang, "cancel"), reply_markup=user_main_kb(lang, uid))
         return
 
     raw = message.text.replace(" ", "").replace("so'm", "").strip()
@@ -913,49 +883,48 @@ async def withdraw_amount_input(message: Message, state: FSMContext) -> None:
         return
 
     amount = float(raw)
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
-    conn.close()
+    user = await db_get_user(uid)
+    avail = max(0.0, float(user.get("balance", 0)) - float(user.get("blocked_balance", 0)))
 
-    avail = max(0.0, user["balance"] - user["blocked_balance"])
     if amount < MIN_WITHDRAWAL:
-        await message.answer(t(uid, "withdraw_min_err", min_w=fmt_sum(MIN_WITHDRAWAL)))
+        await message.answer(t(lang, "withdraw_min_err", min_w=fmt_sum(MIN_WITHDRAWAL)))
         return
 
     if amount > avail:
-        await message.answer(t(uid, "withdraw_no_money"))
+        await message.answer(t(lang, "withdraw_no_money"))
         return
 
-    commission = amount * (COMMISSION_PERCENT / 100.0)
-    net_amount = amount - commission
+    comm = amount * (COMMISSION_PERCENT / 100.0)
+    net = amount - comm
 
-    await state.update_data(amount=amount, commission=commission, net_amount=net_amount, card=user["card_number"])
+    await state.update_data(amount=amount, commission=comm, net_amount=net, card=user["card_number"])
     await state.set_state(WithdrawStates.confirm)
 
-    confirm_kb = InlineKeyboardMarkup(
+    kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="wd_c:yes"),
-                InlineKeyboardButton(text="❌ Bekor qilish", callback_data="wd_c:no")
+                InlineKeyboardButton(text="⚡️ Avtomat Yechish (BRB 24/7)", callback_data="wd_go:auto"),
+                InlineKeyboardButton(text="❌ Bekor qilish", callback_data="wd_go:no")
             ]
         ]
     )
 
     await message.answer(
-        t(uid, "withdraw_confirm",
+        t(lang, "withdraw_confirm",
           amount=fmt_sum(amount),
           comm=COMMISSION_PERCENT,
-          comm_amount=fmt_sum(commission),
-          net_amount=fmt_sum(net_amount),
+          comm_amount=fmt_sum(comm),
+          net_amount=fmt_sum(net),
           card=user["card_number"]),
-        reply_markup=confirm_kb
+        reply_markup=kb
     )
 
 
-@router.callback_query(F.data.startswith("wd_c:"), WithdrawStates.confirm)
-async def withdraw_confirm_cb(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(F.data.startswith("wd_go:"), WithdrawStates.confirm)
+async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) -> None:
     uid = callback.from_user.id
     action = callback.data.split(":")[1]
+    lang = await get_lang(uid)
 
     if action == "no":
         await state.clear()
@@ -970,296 +939,162 @@ async def withdraw_confirm_cb(callback: CallbackQuery, state: FSMContext) -> Non
     card = data["card"]
     await state.clear()
 
+    user = await db_get_user(uid)
     now = utc_now_iso()
-    conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (uid,)).fetchone()
 
-    # Muzlatish
-    conn.execute(
-        "UPDATE users SET blocked_balance = blocked_balance + ?, updated_at = ? WHERE id = ?",
-        (amount, now, user["id"])
-    )
+    # 1. Yandex balansdan ayirish
+    if user.get("yandex_driver_id"):
+        y_ok = await yandex_api.create_transaction(
+            user["yandex_driver_id"],
+            amount,
+            f"BRB 24/7 Avto-yechish karta {card}"
+        )
+        if not y_ok:
+            await callback.message.edit_text("❌ Yandex Pro balansidan mablag' yechishda xatolik yuz berdi!")
+            return
 
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO withdrawals (user_id, amount, commission, net_amount, card_number, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-    """, (user["id"], amount, commission, net_amount, card, now, now))
-    w_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+    # 2. BRB 24/7 orqali kartaga to'lash
+    brb_res = await brb_api.send_payout(card, net_amount, user["id"])
 
-    await callback.message.edit_text(t(uid, "withdraw_sent"))
+    # 3. Bazaga yozish va balansni yangilash
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET balance = balance - $1, updated_at = $2 WHERE id = $3", amount, now, user["id"])
+            await conn.execute("""
+                INSERT INTO withdrawals (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, 'brb_auto', $7, $8, $9)
+            """, user["id"], amount, commission, net_amount, card, "completed" if brb_res["success"] else "manual_pending", brb_res.get("tx_id", ""), now, now)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE users SET balance = balance - ?, updated_at = ? WHERE id = ?", (amount, now, user["id"]))
+        conn.execute("""
+            INSERT INTO withdrawals (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'brb_auto', ?, ?, ?)
+        """, (user["id"], amount, commission, net_amount, card, "completed" if brb_res["success"] else "manual_pending", brb_res.get("tx_id", ""), now, now))
+        conn.commit()
+        conn.close()
+
+    if brb_res["success"]:
+        await callback.message.edit_text(
+            f"✅ <b>Mablag' kartangizga muvaffaqiyatli o'tkazildi!</b>\n\n"
+            f"💰 Summa: <b>{fmt_sum(net_amount)} so'm</b>\n"
+            f"💳 Karta: <code>{card}</code>\n"
+            f"🏦 Tizim: <b>BRB 24/7 Instant Pay</b>"
+        )
+    else:
+        # Agar BRB kaliti qo'yilmagan bo'lsa adminga ariza sifatida tushadi
+        await callback.message.edit_text(
+            f"✅ <b>Arizangiz qabul qilindi!</b>\n\n"
+            f"Admin tekshirib, pulni kartangizga o'tkazadi.\n"
+            f"💰 Summa: <b>{fmt_sum(net_amount)} so'm</b>"
+        )
+
     await callback.answer()
 
-    adm_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ To'landi (Tasdiqlash)", callback_data=f"adm_app:{w_id}"),
-                InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}")
-            ]
-        ]
+
+# --- SOS / YORDAM HANDLERS ---
+
+@router.message(F.text.in_(["🆘 Yordam / SOS", "🆘 Помощь / SOS"]))
+async def sos_handler(message: Message) -> None:
+    lang = await get_lang(message.from_user.id)
+    await message.answer(t(lang, "sos_title"), reply_markup=sos_menu_kb(lang))
+
+
+@router.callback_query(F.data == "sos:loc")
+async def sos_location_flow(callback: CallbackQuery, state: FSMContext) -> None:
+    lang = await get_lang(callback.from_user.id)
+    await state.set_state(SOSStates.waiting_for_location)
+    await callback.message.delete()
+    await callback.message.answer(t(lang, "sos_ask_loc"), reply_markup=location_request_kb(lang))
+    await callback.answer()
+
+
+@router.message(SOSStates.waiting_for_location, F.location)
+async def sos_receive_location(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    lang = await get_lang(uid)
+    await state.clear()
+    user = await db_get_user(uid)
+
+    lat = message.location.latitude
+    lon = message.location.longitude
+
+    alert = (
+        f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / LOKATSIYA!</b>\n\n"
+        f"👤 Haydovchi: <b>{user['full_name']}</b> (<code>{user['position']}</code>)\n"
+        f"📱 Telefon: <code>{user['phone']}</code>\n"
+        f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n\n"
+        f"📍 <a href='https://maps.google.com/?q={lat},{lon}'>Google Xaritada ko'rish</a>"
     )
 
-    for admin_id in ADMIN_IDS:
+    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")]])
+    for adm in ADMIN_IDS:
         try:
-            await bot.send_message(
-                admin_id,
-                f"🔔 <b>Yangi Pul Yechish Arizasi #{w_id}</b>\n\n"
-                f"👤 Haydovchi: <b>{user['full_name']}</b> (<code>{user['position']}</code>)\n"
-                f"📱 Telefon: <code>{user['phone']}</code>\n"
-                f"💳 Karta: <code>{card}</code>\n"
-                f"💰 Summa: <b>{fmt_sum(amount)} so'm</b>\n"
-                f"💵 To'lanadigan summa: <b>{fmt_sum(net_amount)} so'm</b>",
-                reply_markup=adm_kb
-            )
+            await bot.send_message(adm, alert, reply_markup=adm_kb)
+            await bot.send_location(adm, latitude=lat, longitude=lon)
         except Exception:
             pass
 
+    await message.answer(t(lang, "sos_sent"), reply_markup=user_main_kb(lang, uid))
 
-# --- ADMIN PANEL ---
 
-@admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]))
-async def admin_open(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+# --- QOLGAN STANDART TUGMALAR ---
+
+@router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы"]))
+async def orders_handler(message: Message) -> None:
+    lang = await get_lang(message.from_user.id)
+    await message.answer("📊 Bugungi barcha safarlaringiz Yandex Pro ilovasida hisoblanadi va balansingizda aks etadi.", reply_markup=user_main_kb(lang, message.from_user.id))
+
+@router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
+async def profile_handler(message: Message) -> None:
+    uid = message.from_user.id
+    user = await db_get_user(uid)
+    lang = await get_lang(uid)
+    if not user:
         return
-    await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb())
-
-
-@admin_router.message(F.text == "📊 Statistika")
-async def admin_stats(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    conn = get_db()
-    total_drivers = conn.execute("SELECT COUNT(*) FROM users WHERE is_registered = 1").fetchone()[0]
-    pending_w = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status = 'pending'").fetchone()[0]
-    total_paid = conn.execute("SELECT SUM(amount) FROM withdrawals WHERE status = 'completed'").fetchone()[0] or 0
-    conn.close()
-
-    await message.answer(
-        f"📊 <b>{BOT_NAME} Statistikasi:</b>\n\n"
-        f"👥 Ro'yxatdan o'tgan haydovchilar: <b>{total_drivers} ta</b>\n"
-        f"⏳ Kutilayotgan arizalar: <b>{pending_w} ta</b>\n"
-        f"💸 Jami to'lab berilgan mablag': <b>{fmt_sum(total_paid)} so'm</b>"
+    text = (
+        f"👤 <b>Haydovchi Profili:</b>\n\n"
+        f"🆔 POSITION: <code>{user['position']}</code>\n"
+        f"👤 Ism: <b>{user['full_name']}</b>\n"
+        f"📱 Telefon: <b>{user['phone']}</b>\n"
+        f"🚗 Mashina: <b>{user['car_model']} ({user['car_number']})</b>\n"
+        f"💳 Karta: <code>{user['card_number']}</code>\n"
+        f"🚕 Yandex: <code>{user['yandex_driver_id'] or 'Ulanmagan'}</code>"
     )
+    await message.answer(text, reply_markup=user_main_kb(lang, uid))
 
-
-@admin_router.message(F.text == "👥 Haydovchilar ro'yxati")
-async def admin_drivers_list(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    conn = get_db()
-    drivers = conn.execute("SELECT * FROM users WHERE is_registered = 1 ORDER BY id DESC LIMIT 15").fetchall()
-    conn.close()
-
-    if not drivers:
-        await message.answer("Hozircha ro'yxatdan o'tgan haydovchilar yo'q.")
-        return
-
-    text = f"👥 <b>So'nggi 15 ta haydovchi:</b>\n\n"
-    for d in drivers:
-        text += (
-            f"🆔 <code>{d['position']}</code> | <b>{d['full_name']}</b>\n"
-            f"📱 Tel: {d['phone']} | 🚗 {d['car_model']} ({d['car_number']})\n"
-            f"💰 Balans: {fmt_sum(d['balance'])} so'm\n"
-            f"---------------------------\n"
-        )
-    await message.answer(text)
-
-
-@admin_router.callback_query(F.data.startswith("adm_app:"))
-async def admin_approve_wd(callback: CallbackQuery) -> None:
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("Ruxsat yo'q!", show_alert=True)
-        return
-
-    w_id = int(callback.data.split(":")[1])
-    now = utc_now_iso()
-
-    conn = get_db()
-    w = conn.execute("SELECT * FROM withdrawals WHERE id = ?", (w_id,)).fetchone()
-    if not w or w["status"] != "pending":
-        conn.close()
-        await callback.answer("Bu ariza allaqachon bajarilgan!", show_alert=True)
-        return
-
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (w["user_id"],)).fetchone()
-
-    conn.execute("""
-        UPDATE users SET 
-            balance = balance - ?, 
-            blocked_balance = blocked_balance - ?, 
-            updated_at = ? 
-        WHERE id = ?
-    """, (w["amount"], w["amount"], now, user["id"]))
-
-    conn.execute("UPDATE withdrawals SET status = 'completed', admin_id = ?, updated_at = ? WHERE id = ?",
-                 (callback.from_user.id, now, w_id))
-    conn.commit()
-
-    if user["yandex_driver_id"]:
-        await yandex_api.create_transaction(
-            user["yandex_driver_id"],
-            w["amount"],
-            f"Pul yechish #{w_id} karta {user['card_number']}"
-        )
-    conn.close()
-
-    await callback.message.edit_text(callback.message.text + f"\n\n✅ <b>ADMIN ({callback.from_user.full_name}) TOMONIDAN TO'LANDI!</b>")
-    try:
-        await bot.send_message(
-            user["telegram_id"],
-            f"✅ <b>Pul yechish arizangiz bajarildi!</b>\n\n"
-            f"💰 Summa: <b>{fmt_sum(w['net_amount'])} so'm</b>\n"
-            f"💳 Karta: <code>{w['card_number']}</code> ga o'tkazildi."
-        )
-    except Exception:
-        pass
-    await callback.answer()
-
-
-@admin_router.callback_query(F.data.startswith("adm_rej:"))
-async def admin_reject_wd(callback: CallbackQuery) -> None:
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("Ruxsat yo'q!", show_alert=True)
-        return
-
-    w_id = int(callback.data.split(":")[1])
-    now = utc_now_iso()
-
-    conn = get_db()
-    w = conn.execute("SELECT * FROM withdrawals WHERE id = ?", (w_id,)).fetchone()
-    if not w or w["status"] != "pending":
-        conn.close()
-        await callback.answer("Bu ariza allaqachon ko'rib chiqilgan!", show_alert=True)
-        return
-
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (w["user_id"],)).fetchone()
-
-    conn.execute("""
-        UPDATE users SET 
-            blocked_balance = blocked_balance - ?, 
-            updated_at = ? 
-        WHERE id = ?
-    """, (w["amount"], now, user["id"]))
-
-    conn.execute("UPDATE withdrawals SET status = 'cancelled', admin_id = ?, updated_at = ? WHERE id = ?",
-                 (callback.from_user.id, now, w_id))
-    conn.commit()
-    conn.close()
-
-    await callback.message.edit_text(callback.message.text + f"\n\n❌ <b>ADMIN ({callback.from_user.full_name}) TOMONIDAN RAD ETILDI!</b>")
-    try:
-        await bot.send_message(
-            user["telegram_id"],
-            f"❌ <b>Pul yechish arizangiz rad etildi!</b>\n\n"
-            f"Mablag' ({fmt_sum(w['amount'])} so'm) balansingizga qaytarildi."
-        )
-    except Exception:
-        pass
-    await callback.answer()
-
-
-# --- YUQORI TEZLIKDAGI BROADCAST (5000 HAYDOVCHIGA XABAR) ---
-
-async def async_broadcast_worker(admin_id: int, message: Message):
-    conn = get_db()
-    users = conn.execute("SELECT telegram_id FROM users WHERE is_registered = 1").fetchall()
-    conn.close()
-
-    total = len(users)
-    sent = 0
-    failed = 0
-
-    status_msg = await bot.send_message(admin_id, f"⏳ Xabar tarqatilmoqda: 0 / {total}...")
-
-    for idx, u in enumerate(users, 1):
-        try:
-            await message.copy_to(chat_id=u["telegram_id"])
-            sent += 1
-        except Exception:
-            failed += 1
-
-        # Telegram Flood Limitdan saqlanish (sekundiga ~25 ta)
-        await asyncio.sleep(0.04)
-
-        if idx % 100 == 0 or idx == total:
-            try:
-                await status_msg.edit_text(f"⏳ Xabar tarqatilmoqda: {idx} / {total}...")
-            except Exception:
-                pass
-
-    await bot.send_message(
-        admin_id,
-        f"✅ <b>Xabar tarqatish yakunlandi!</b>\n\n"
-        f"📊 Jami haydovchilar: <b>{total} ta</b>\n"
-        f"✅ Yetkazildi: <b>{sent} ta</b>\n"
-        f"❌ Yetkazilmadi (bloklagan): <b>{failed} ta</b>"
-    )
-
-
-@admin_router.message(F.text == "📢 Xabar yuborish (Hammaga)")
-async def broadcast_prompt(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await state.set_state(AdminBroadcast.message)
-    await message.answer("📢 Barcha haydovchilarga yubormoqchi bo'lgan xabaringizni yozing (rasm, video yoki matn):", reply_markup=cancel_kb(message.from_user.id))
-
-
-@admin_router.message(AdminBroadcast.message)
-async def broadcast_send(message: Message, state: FSMContext) -> None:
-    if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
-        await state.clear()
-        await message.answer("Bekor qilindi.", reply_markup=admin_main_kb())
-        return
-
-    await state.clear()
-    await message.answer("🚀 Xabar tarqatish orqa fonda boshlandi! Bot qotmasdan ishlayveradi.", reply_markup=admin_main_kb())
-    # Orqa fonda alohida task qilib ishga tushirish
-    asyncio.create_task(async_broadcast_worker(message.from_user.id, message))
-
-
-@admin_router.message(F.text == "⬅️ Asosiy menyu")
-async def back_to_user_menu(message: Message) -> None:
-    await message.answer("Asosiy menyuga qaytdingiz:", reply_markup=user_main_kb(message.from_user.id))
+@router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа"]))
+async def group_handler(message: Message) -> None:
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchilar guruhiga qo'shilish", url=DRIVER_GROUP_LINK)]])
+    await message.answer(f"📢 <b>{BOT_NAME} Haydovchilar Guruhi:</b>", reply_markup=kb)
 
 
 # ============================================================
-# RENDER & UPTIMEROBOT UCHUN VEB SERVER
+# VEB SERVER VA ISHGA TUSHIRISH
 # ============================================================
 
 routes = web.RouteTableDef()
-
 @routes.get("/")
 @routes.get("/health")
 async def health_check(request: web.Request) -> web.Response:
-    return web.Response(text="LOCHIN TAXI BOT IS RUNNING 24/7", status=200)
+    return web.Response(text="LOCHIN TAXI 24/7 IS RUNNING", status=200)
 
-async def start_web_server():
+async def start_web():
     app = web.Application()
     app.add_routes(routes)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"🌐 Veb-server port {PORT} da ishga tushdi (Render & UptimeRobot).")
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 async def main() -> None:
+    await init_database()
     dp.include_router(admin_router)
     dp.include_router(router)
-
-    await start_web_server()
-    logger.info(f"🚕 {BOT_NAME} Polling orqali ishga tushdi!")
+    await start_web()
+    logger.info(f"🚕 {BOT_NAME} Enterprise tizimi ishga tushdi!")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
