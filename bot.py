@@ -112,7 +112,6 @@ async def init_database():
         try:
             clean_url = DATABASE_URL.replace("postgres://", "postgresql://").replace("?sslmode=require", "")
             logger.info("PostgreSQL ga ulanish boshlanmoqda...")
-            # 5 soniya ichida ulanmasa xato bermasdan SQLite ga o'tadi
             db_pool = await asyncio.wait_for(
                 asyncpg.create_pool(clean_url, ssl="require", min_size=1, max_size=10, command_timeout=10),
                 timeout=5.0
@@ -156,7 +155,6 @@ async def init_database():
                         updated_at TEXT NOT NULL
                     );
                 """)
-                # Eski jadvallarni BIGINT ga moslash (xavfsizlik uchun)
                 try:
                     await conn.execute("ALTER TABLE users ALTER COLUMN telegram_id TYPE BIGINT;")
                     await conn.execute("ALTER TABLE users ALTER COLUMN referrer_id TYPE BIGINT;")
@@ -1606,22 +1604,36 @@ async def sos_receive_location_geo(message: Message, state: FSMContext) -> None:
         lon = message.location.longitude
         maps_url = f"https://maps.google.com/?q={lat},{lon}"
 
-        drv_name = user.get("full_name") or "Haydovchi"
-        drv_pos = user.get("position") or "N/A"
-        drv_phone = user.get("phone") or "Nomalum"
-        drv_car_m = user.get("car_model") or ""
-        drv_car_n = user.get("car_number") or ""
+        drv_name = user.get("full_name") or message.from_user.full_name or "Haydovchi"
+        drv_pos = user.get("position") or "Ro'yxatdan o'tmagan"
+        drv_phone = user.get("phone") or "Kiritilmagan"
+        
+        car_m = user.get("car_model") or ""
+        car_n = user.get("car_number") or ""
+        drv_car = f"{car_m} ({car_n})".strip() if (car_m or car_n) else "Kiritilmagan"
+        
+        drv_card = user.get("card_number") or "Yo'q"
+        drv_yandex = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
+        
+        tg_username = f"@{message.from_user.username}" if message.from_user.username else (f"@{user.get('username')}" if user.get("username") else "Mavjud emas")
 
         alert = (
             f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / LOKATSIYA!</b>\n\n"
-            f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
-            f"📱 Telefon: <code>{drv_phone}</code>\n"
-            f"🚗 Mashina: <b>{drv_car_m} ({drv_car_n})</b>\n\n"
-            f"📍 <a href='{maps_url}'>Google Xaritada ochish</a>"
+            f"🆔 <b>POSITION (Pozivnoy):</b> <code>{drv_pos}</code>\n"
+            f"👤 <b>F.I.O / Ism:</b> <b>{drv_name}</b>\n"
+            f"📱 <b>Telefon:</b> <code>{drv_phone}</code>\n"
+            f"🚗 <b>Avtomobil:</b> <b>{drv_car}</b>\n"
+            f"💳 <b>Karta:</b> <code>{drv_card}</code>\n"
+            f"🚕 <b>Yandex Pro:</b> {drv_yandex}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"🌐 <b>Telegram Username:</b> {tg_username}\n"
+            f"🆔 <b>Telegram ID:</b> <code>{uid}</code>\n\n"
+            f"📍 <a href='{maps_url}'>🗺 Google Xaritada ochish</a>"
         )
 
+        chat_url = f"https://t.me/{message.from_user.username}" if message.from_user.username else f"tg://user?id={uid}"
         adm_kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")]]
+            inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=chat_url)]]
         )
 
         for adm in ADMIN_IDS:
@@ -1651,22 +1663,36 @@ async def sos_receive_location_text(message: Message, state: FSMContext) -> None
         user = await db_get_user(uid) or {}
         address_text = message.text.strip()
 
-        drv_name = user.get("full_name") or "Haydovchi"
-        drv_pos = user.get("position") or "N/A"
-        drv_phone = user.get("phone") or "Nomalum"
-        drv_car_m = user.get("car_model") or ""
-        drv_car_n = user.get("car_number") or ""
+        drv_name = user.get("full_name") or message.from_user.full_name or "Haydovchi"
+        drv_pos = user.get("position") or "Ro'yxatdan o'tmagan"
+        drv_phone = user.get("phone") or "Kiritilmagan"
+        
+        car_m = user.get("car_model") or ""
+        car_n = user.get("car_number") or ""
+        drv_car = f"{car_m} ({car_n})".strip() if (car_m or car_n) else "Kiritilmagan"
+        
+        drv_card = user.get("card_number") or "Yo'q"
+        drv_yandex = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
+        
+        tg_username = f"@{message.from_user.username}" if message.from_user.username else (f"@{user.get('username')}" if user.get("username") else "Mavjud emas")
 
         alert = (
             f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / MANZIL (DESKTOP):</b>\n\n"
-            f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
-            f"📱 Telefon: <code>{drv_phone}</code>\n"
-            f"🚗 Mashina: <b>{drv_car_m} ({drv_car_n})</b>\n\n"
+            f"🆔 <b>POSITION (Pozivnoy):</b> <code>{drv_pos}</code>\n"
+            f"👤 <b>F.I.O / Ism:</b> <b>{drv_name}</b>\n"
+            f"📱 <b>Telefon:</b> <code>{drv_phone}</code>\n"
+            f"🚗 <b>Avtomobil:</b> <b>{drv_car}</b>\n"
+            f"💳 <b>Karta:</b> <code>{drv_card}</code>\n"
+            f"🚕 <b>Yandex Pro:</b> {drv_yandex}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"🌐 <b>Telegram Username:</b> {tg_username}\n"
+            f"🆔 <b>Telegram ID:</b> <code>{uid}</code>\n\n"
             f"📍 <b>Manzil / Holat:</b>\n{address_text}"
         )
 
+        chat_url = f"https://t.me/{message.from_user.username}" if message.from_user.username else f"tg://user?id={uid}"
         adm_kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")]]
+            inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=chat_url)]]
         )
 
         for adm in ADMIN_IDS:
@@ -1710,22 +1736,36 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
         user = await db_get_user(uid) or {}
         msg_body = message.text or "[Xabar]"
 
-        drv_name = user.get("full_name") or "Haydovchi"
-        drv_pos = user.get("position") or "N/A"
-        drv_phone = user.get("phone") or "Nomalum"
-        drv_car_m = user.get("car_model") or ""
-        drv_car_n = user.get("car_number") or ""
+        drv_name = user.get("full_name") or message.from_user.full_name or "Haydovchi"
+        drv_pos = user.get("position") or "Ro'yxatdan o'tmagan"
+        drv_phone = user.get("phone") or "Kiritilmagan"
+        
+        car_m = user.get("car_model") or ""
+        car_n = user.get("car_number") or ""
+        drv_car = f"{car_m} ({car_n})".strip() if (car_m or car_n) else "Kiritilmagan"
+        
+        drv_card = user.get("card_number") or "Yo'q"
+        drv_yandex = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
+        
+        tg_username = f"@{message.from_user.username}" if message.from_user.username else (f"@{user.get('username')}" if user.get("username") else "Mavjud emas")
 
         alert = (
             f"📩 <b>HAYDOVCHIDAN MUROJAAT / XABAR:</b>\n\n"
-            f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
-            f"📱 Telefon: <code>{drv_phone}</code>\n"
-            f"🚗 Mashina: <b>{drv_car_m} ({drv_car_n})</b>\n\n"
+            f"🆔 <b>POSITION (Pozivnoy):</b> <code>{drv_pos}</code>\n"
+            f"👤 <b>F.I.O / Ism:</b> <b>{drv_name}</b>\n"
+            f"📱 <b>Telefon:</b> <code>{drv_phone}</code>\n"
+            f"🚗 <b>Avtomobil:</b> <b>{drv_car}</b>\n"
+            f"💳 <b>Karta:</b> <code>{drv_card}</code>\n"
+            f"🚕 <b>Yandex Pro:</b> {drv_yandex}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"🌐 <b>Telegram Username:</b> {tg_username}\n"
+            f"🆔 <b>Telegram ID:</b> <code>{uid}</code>\n\n"
             f"✍️ <b>Xabar matni:</b>\n{msg_body}"
         )
 
+        chat_url = f"https://t.me/{message.from_user.username}" if message.from_user.username else f"tg://user?id={uid}"
         adm_kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="💬 Javob yozish", url=f"tg://user?id={uid}")]]
+            inline_keyboard=[[InlineKeyboardButton(text="💬 Javob yozish", url=chat_url)]]
         )
 
         for adm in ADMIN_IDS:
