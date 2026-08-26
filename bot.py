@@ -63,7 +63,7 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
-# Yandex Fleet API sozlamalari (Header registri qat'iy X-Client-ID va X-Park-ID)
+# Yandex Fleet API sozlamalari (Header registri qat'iy standartda)
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
 YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
@@ -151,9 +151,9 @@ async def init_database():
                         updated_at TEXT NOT NULL
                     );
                 """)
-            logger.info("✅ PostgreSQL bazasi tayyor!")
+            logger.info("PostgreSQL bazasi tayyor!")
         except Exception as e:
-            logger.error(f"❌ PostgreSQL ga ulanishda xato, SQLite ga o'tilmoqda: {e}")
+            logger.error(f"PostgreSQL ga ulanishda xato: {e}")
             db_pool = None
 
     if not db_pool:
@@ -200,7 +200,7 @@ async def init_database():
         """)
         conn.commit()
         conn.close()
-        logger.info("✅ SQLite bazasi tayyor!")
+        logger.info("SQLite bazasi tayyor!")
 
 
 async def db_get_user(telegram_id: int) -> Optional[dict]:
@@ -444,7 +444,6 @@ class YandexFleetAPI:
         except Exception as e:
             logger.error(f"Yandex get_driver_by_phone xatosi: {e}")
 
-        # Ro'yxatdan qidirish
         all_drivers = await self.get_all_drivers(limit=1000)
         for drv in all_drivers:
             prof = drv.get("driver_profile", {})
@@ -469,7 +468,7 @@ class YandexFleetAPI:
         car_model = car.get("model", "").strip()
         brand_and_model = car.get("brand_and_model", "").strip()
         car_title = brand_and_model or f"{car_brand} {car_model}".strip() or "Chevrolet Cobalt"
-        car_number = car.get("number", "").strip() or car.get("normalized_number", "").strip() or "Nomaʼlum"
+        car_number = car.get("number", "").strip() or car.get("normalized_number", "").strip() or "Noma'lum"
 
         balance = 0.0
         if accounts:
@@ -637,7 +636,7 @@ async def generate_monthly_excel_report() -> bytes:
         total_balance_sum += bal
 
         row_data = [
-            idx, drv.get("position", "N/A"), drv.get("full_name", "Nomaʼlum"),
+            idx, drv.get("position", "N/A"), drv.get("full_name", "Noma'lum"),
             drv.get("phone", ""), drv.get("car_model", ""), drv.get("car_number", ""),
             drv.get("card_number", ""), orders, int(earnings), int(comm), int(bal),
             drv.get("yandex_driver_id", "Yo'q")
@@ -986,7 +985,7 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
     if y_driver:
         full_name = y_driver.get("full_name", "Haydovchi")
         car_model = y_driver.get("car_model", "Chevrolet Cobalt")
-        car_number = y_driver.get("car_number", "Nomaʼlum")
+        car_number = y_driver.get("car_number", "Noma'lum")
         y_id = y_driver.get("id")
 
         await state.update_data(
@@ -1074,6 +1073,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     car_model = data.get("car_model", "Chevrolet")
     car_number = data.get("car_number", "")
     y_id = data.get("yandex_driver_id")
+    yandex_status_text = "Ulangan" if y_id else "Ulanmagan"
 
     position = await db_finish_registration(
         telegram_id=uid,
@@ -1097,7 +1097,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
                 f"🚗 Mashina: <b>{car_model} ({car_number})</b>\n"
                 f"💳 Karta: <code>{card}</code>\n"
                 f"🆔 POSITION: <code>{position}</code>\n"
-                f"🚕 Yandex: <b>{'✅ Ulangan' if y_id else '⚠️ Alohida qo\'shish kerak'}</b>"
+                f"🚕 Yandex: <b>{yandex_status_text}</b>"
             )
         except Exception:
             pass
@@ -1446,7 +1446,7 @@ async def sos_receive_location_geo(message: Message, state: FSMContext) -> None:
     alert = (
         f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / LOKATSIYA!</b>\n\n"
         f"👤 Haydovchi: <b>{user.get('full_name', 'Haydovchi')}</b> (<code>{user.get('position', 'N/A')}</code>)\n"
-        f"📱 Telefon: <code>{user.get('phone', 'Nomaʼlum')}</code>\n"
+        f"📱 Telefon: <code>{user.get('phone', 'Noma\'lum')}</code>\n"
         f"🚗 Mashina: <b>{user.get('car_model', '')} ({user.get('car_number', '')})</b>\n\n"
         f"📍 <a href='{maps_url}'>Google Xaritada ochish</a>"
     )
@@ -1482,7 +1482,7 @@ async def sos_receive_location_text(message: Message, state: FSMContext) -> None
     alert = (
         f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / MANZIL (DESKTOP):</b>\n\n"
         f"👤 Haydovchi: <b>{user.get('full_name', 'Haydovchi')}</b> (<code>{user.get('position', 'N/A')}</code>)\n"
-        f"📱 Telefon: <code>{user.get('phone', 'Nomaʼlum')}</code>\n"
+        f"📱 Telefon: <code>{user.get('phone', 'Noma\'lum')}</code>\n"
         f"🚗 Mashina: <b>{user.get('car_model', '')} ({user.get('car_number', '')})</b>\n\n"
         f"📍 <b>Manzil / Holat:</b>\n{address_text}"
     )
@@ -1529,7 +1529,7 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
     alert = (
         f"📩 <b>HAYDOVCHIDAN MUROJAAT / XABAR:</b>\n\n"
         f"👤 Haydovchi: <b>{user.get('full_name', 'Haydovchi')}</b> (<code>{user.get('position', 'N/A')}</code>)\n"
-        f"📱 Telefon: <code>{user.get('phone', 'Nomaʼlum')}</code>\n"
+        f"📱 Telefon: <code>{user.get('phone', 'Noma\'lum')}</code>\n"
         f"🚗 Mashina: <b>{user.get('car_model', '')} ({user.get('car_number', '')})</b>\n\n"
         f"✍️ <b>Xabar matni:</b>\n{msg_body}"
     )
@@ -1752,7 +1752,7 @@ async def admin_inactive_drivers(message: Message) -> None:
         text += (
             f"👤 <b>{drv.get('full_name')}</b> | 📱 Tel: {drv.get('phone')}\n"
             f"🚗 {drv.get('car_model')} ({drv.get('car_number')})\n"
-            f"📅 Faollik: {str(drv.get('last_activity', 'Nomaʼlum'))[:10]}\n---------------------------\n"
+            f"📅 Faollik: {str(drv.get('last_activity', 'Noma\'lum'))[:10]}\n---------------------------\n"
         )
     await message.answer(text)
 
@@ -1802,10 +1802,10 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"🌐 Web server 0.0.0.0:{PORT} portida ishga tushdi.")
+    logger.info(f"Web server 0.0.0.0:{PORT} portida ishga tushdi.")
 
 async def main() -> None:
-    logger.info("🚀 Lochin Taxi Bot ishga tushmoqda...")
+    logger.info("Lochin Taxi Bot ishga tushmoqda...")
     await init_database()
 
     dp.include_router(admin_router)
@@ -1815,7 +1815,7 @@ async def main() -> None:
     asyncio.create_task(monthly_report_scheduler())
 
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info(f"🚕 {BOT_NAME} muvaffaqiyatli ishga tushdi va xabarlarni qabul qilmoqda!")
+    logger.info(f"{BOT_NAME} muvaffaqiyatli ishga tushdi va xabarlarni qabul qilmoqda!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
