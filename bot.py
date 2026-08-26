@@ -65,11 +65,11 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
-# Yandex Fleet API sozlamalari
+# Yandex Fleet API sozlamalari (Rasmiy domen)
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
 YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
-YANDEX_FLEET_URL = "https://fleet-api.yandex.ru/v1"
+YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
 # Pul yechish qoidalari (20 000 so'm depozit ushlab qolinadi)
 MIN_DEPOSIT_BALANCE = int(os.getenv("MIN_DEPOSIT_BALANCE", "20000"))
@@ -518,12 +518,18 @@ async def db_get_stats() -> dict:
 # YANDEX FLEET API
 # ============================================================
 
+YANDEX_CANDIDATE_URLS = [
+    "https://fleet-api.taxi.yandex.net",
+    "https://fleet-api.yandex.net",
+    "https://fleet-api.yandex.ru",
+]
+
 class YandexFleetAPI:
     def __init__(self, api_key: str, client_id: str, park_id: str):
         self.api_key = api_key.strip()
         self.client_id = client_id.strip()
         self.park_id = park_id.strip()
-        self.base_url = YANDEX_FLEET_URL.rstrip("/")
+        self.active_base_url = "https://fleet-api.taxi.yandex.net"
         self._cached_drivers: List[dict] = []
         self._cache_time: float = 0
 
@@ -549,40 +555,36 @@ class YandexFleetAPI:
         if not force_refresh and self._cached_drivers and (now_t - self._cache_time < 60):
             return self._cached_drivers, ""
 
-        url = f"{self.base_url}/parks/driver-profiles/list"
         payload = {"query": {"park": {"id": self.park_id}}, "limit": limit}
+        last_error = ""
 
-        # 1-urinish: mavjud client_id bilan
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self._get_headers(False), json=payload, timeout=25) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        drivers = data.get("driver_profiles", [])
-                        self._cached_drivers = drivers
-                        self._cache_time = now_t
-                        logger.info(f"Yandex Fleet: {len(drivers)} ta haydovchi yuklandi!")
-                        return drivers, ""
-                    elif resp.status in [400, 401, 403]:
-                        # 2-urinish: taxi/park/{park_id} bilan
-                        async with session.post(url, headers=self._get_headers(True), json=payload, timeout=25) as resp2:
-                            if resp2.status == 200:
-                                data = await resp2.json()
-                                drivers = data.get("driver_profiles", [])
-                                self._cached_drivers = drivers
-                                self._cache_time = now_t
-                                logger.info(f"Yandex Fleet (fallback): {len(drivers)} ta haydovchi yuklandi!")
-                                return drivers, ""
-                            err_text = await resp2.text()
-                            logger.error(f"Yandex Fleet get_all_drivers status {resp2.status}: {err_text}")
-                            return [], f"HTTP {resp2.status}: {err_text[:180]}"
-                    else:
-                        err_text = await resp.text()
-                        logger.error(f"Yandex Fleet get_all_drivers status {resp.status}: {err_text}")
-                        return [], f"HTTP {resp.status}: {err_text[:180]}"
-        except Exception as e:
-            logger.error(f"Yandex get_all_drivers xatosi: {e}")
-            return [], str(e)
+        urls_to_try = [self.active_base_url] + [u for u in YANDEX_CANDIDATE_URLS if u != self.active_base_url]
+
+        async with aiohttp.ClientSession() as session:
+            for base_url in urls_to_try:
+                for endpoint_path in ["/v1/parks/driver-profiles/list", "/parks/driver-profiles/list"]:
+                    target_url = f"{base_url}{endpoint_path}"
+                    for use_fallback_hdr in [False, True]:
+                        try:
+                            headers = self._get_headers(use_fallback_hdr)
+                            async with session.post(target_url, headers=headers, json=payload, timeout=15) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    drivers = data.get("driver_profiles", [])
+                                    self._cached_drivers = drivers
+                                    self._cache_time = now_t
+                                    self.active_base_url = base_url
+                                    logger.info(f"Yandex Fleet ({target_url}): {len(drivers)} ta haydovchi yuklandi!")
+                                    return drivers, ""
+                                else:
+                                    err_text = await resp.text()
+                                    last_error = f"HTTP {resp.status}: {err_text[:120]}"
+                                    logger.warning(f"Yandex test {target_url} (status {resp.status}): {err_text[:100]}")
+                        except Exception as e:
+                            last_error = str(e)
+                            logger.warning(f"Yandex connection {target_url} error: {e}")
+
+        return [], last_error
 
     async def get_driver_by_phone(self, phone: str) -> Optional[dict]:
         if not self._is_configured():
@@ -665,7 +667,7 @@ class YandexFleetAPI:
     async def get_driver_balance(self, yandex_driver_id: str) -> Optional[float]:
         if not self._is_configured() or not yandex_driver_id:
             return None
-        url = f"{self.base_url}/parks/driver-profiles/list"
+        url = f"{self.active_base_url}/v1/parks/driver-profiles/list"
         payload = {"query": {"park": {"id": self.park_id}, "driver": {"id": [yandex_driver_id]}}, "limit": 1}
         try:
             async with aiohttp.ClientSession() as session:
@@ -683,7 +685,6 @@ class YandexFleetAPI:
     async def create_transaction(self, yandex_driver_id: str, amount: float, description: str) -> bool:
         if not self._is_configured() or not yandex_driver_id:
             return False
-        url = f"{self.base_url}/parks/driver-profiles/transactions"
         category = os.getenv("YANDEX_TX_CATEGORY", "didox out").strip() or "didox out"
         payload = {
             "park_id": self.park_id,
@@ -692,18 +693,21 @@ class YandexFleetAPI:
             "category_id": category,
             "description": description
         }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self._get_headers(), json=payload, timeout=12) as resp:
-                    if resp.status in [200, 201]:
-                        return True
-                    else:
-                        payload["category_id"] = "other"
-                        async with session.post(url, headers=self._get_headers(), json=payload, timeout=12) as resp2:
-                            return resp2.status in [200, 201]
-        except Exception as e:
-            logger.error(f"Yandex tranzaksiya xatosi: {e}")
-            return False
+        
+        async with aiohttp.ClientSession() as session:
+            for endpoint in [f"{self.active_base_url}/v2/parks/driver-profiles/transactions", f"{self.active_base_url}/v1/parks/driver-profiles/transactions"]:
+                try:
+                    async with session.post(endpoint, headers=self._get_headers(), json=payload, timeout=12) as resp:
+                        if resp.status in [200, 201]:
+                            return True
+                        else:
+                            payload["category_id"] = "other"
+                            async with session.post(endpoint, headers=self._get_headers(), json=payload, timeout=12) as resp2:
+                                if resp2.status in [200, 201]:
+                                    return True
+                except Exception as e:
+                    logger.error(f"Yandex tranzaksiya xatosi ({endpoint}): {e}")
+        return False
 
 yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
@@ -1343,7 +1347,6 @@ async def balance_handler(message: Message) -> None:
                 cur_bal = live_bal
                 await db_update_balance(uid, live_bal)
 
-        # 20 000 so'm depozit ushlab qolinadi
         avail = max(0.0, cur_bal - MIN_DEPOSIT_BALANCE)
         await message.answer(
             t(lang, "balance_detail",
@@ -1659,7 +1662,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         drv_car_n = user.get("car_number") or ""
         drv_yandex = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
 
-        # Admin uchun qulay boshqaruv tugmalari
         adm_kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1735,7 +1737,6 @@ async def admin_handle_withdrawal_decision(callback: CallbackQuery) -> None:
             )
             await callback.answer("✅ To'lov tasdiqlandi!")
 
-            # Haydovchiga xushxabar
             try:
                 msg_for_drv = (
                     f"✅ <b>Mablag' kartangizga o'tkazib berildi!</b>\n\n"
@@ -1762,7 +1763,6 @@ async def admin_handle_withdrawal_decision(callback: CallbackQuery) -> None:
             )
             await callback.answer("❌ Ariza rad etildi!")
 
-            # Haydovchiga xabar
             try:
                 msg_for_drv = (
                     f"❌ <b>Pul yechish arizangiz ma'muriyat tomonidan rad etildi.</b>\n\n"
