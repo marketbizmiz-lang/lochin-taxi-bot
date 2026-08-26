@@ -378,6 +378,21 @@ async def db_finish_registration(telegram_id: int, full_name: str, phone: str, c
     return position
 
 
+async def db_update_card(telegram_id: int, card_number: str):
+    now = utc_now_iso()
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE users SET card_number = $1, updated_at = $2 WHERE telegram_id = $3", card_number, now, telegram_id)
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE users SET card_number = ?, updated_at = ? WHERE telegram_id = ?", (card_number, now, telegram_id))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        logger.error(f"db_update_card xatosi: {e}")
+
+
 async def db_update_balance(telegram_id: int, balance: float):
     now = utc_now_iso()
     try:
@@ -1086,6 +1101,9 @@ class RegStates(StatesGroup):
     car_model = State()
     car_number = State()
 
+class CardChangeStates(StatesGroup):
+    waiting_for_card = State()
+
 class WithdrawStates(StatesGroup):
     amount = State()
     confirm = State()
@@ -1531,6 +1549,8 @@ async def top_drivers_handler(message: Message) -> None:
         logger.error(f"top_drivers_handler xatosi: {e}")
 
 
+# --- PROFIL VA KARTANI O'ZGARTIRISH ---
+
 @router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
 async def profile_handler(message: Message) -> None:
     try:
@@ -1556,11 +1576,12 @@ async def profile_handler(message: Message) -> None:
                 f"👤 Ism: <b>{name_val}</b>\n"
                 f"📱 Telefon: <b>{phone_val}</b>\n"
                 f"🚗 Avtomobil: <b>{car_m_val} ({car_n_val})</b>\n"
-                f"💳 Karta: <code>{card_val}</code>\n"
+                f"💳 Plastik Karta: <code>{card_val}</code>\n"
                 f"🚕 Yandex: <b>{y_val}</b>\n"
-                f"🌐 Til: <b>Ozbekcha</b>"
+                f"🌐 Til: <b>O'zbekcha</b>"
             )
-            change_lang_btn = "🌐 Tilni ozgartirish"
+            change_card_btn = "💳 Kartani o'zgartirish"
+            change_lang_btn = "🌐 Tilni o'zgartirish"
         else:
             text = (
                 f"👤 <b>Профиль Водителя:</b>\n\n"
@@ -1572,14 +1593,79 @@ async def profile_handler(message: Message) -> None:
                 f"🚕 Яндекс: <b>{y_val}</b>\n"
                 f"🌐 Язык: <b>Русский</b>"
             )
+            change_card_btn = "💳 Сменить карту"
             change_lang_btn = "🌐 Сменить язык"
 
         inline_kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text=change_lang_btn, callback_data="change_lang_menu")]]
+            inline_keyboard=[
+                [InlineKeyboardButton(text=change_card_btn, callback_data="change_card_flow")],
+                [InlineKeyboardButton(text=change_lang_btn, callback_data="change_lang_menu")]
+            ]
         )
         await message.answer(text, reply_markup=inline_kb)
     except Exception as e:
         logger.error(f"profile_handler xatosi: {e}")
+
+
+@router.callback_query(F.data == "change_card_flow", StateFilter("*"))
+async def change_card_flow_start(callback: CallbackQuery, state: FSMContext) -> None:
+    try:
+        lang = await get_lang(callback.from_user.id)
+        await state.set_state(CardChangeStates.waiting_for_card)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        msg = (
+            "💳 <b>Yangi plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n"
+            "<i>Misol: 8600 1234 5678 9012 yoki 9860...</i>\n\n"
+            "<i>Bekor qilish uchun '❌ Bekor qilish' tugmasini bosing.</i>"
+        ) if lang == "uz" else (
+            "💳 <b>Введите новый 16-значный номер карты:</b>\n\n"
+            "<i>Пример: 8600 1234 5678 9012</i>\n\n"
+            "<i>Для отмены нажмите '❌ Отмена'.</i>"
+        )
+        await callback.message.answer(msg, reply_markup=cancel_kb(lang))
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"change_card_flow_start xatosi: {e}")
+
+
+@router.message(CardChangeStates.waiting_for_card)
+async def change_card_save(message: Message, state: FSMContext) -> None:
+    try:
+        uid = message.from_user.id
+        lang = await get_lang(uid)
+
+        if message.text in ["❌ Bekor qilish", "❌ Отмена", "bekor", "отмена", "/cancel"]:
+            await state.clear()
+            await message.answer(t(lang, "action_cancelled"), reply_markup=user_main_kb(lang, uid))
+            return
+
+        card = (message.text or "").strip().replace(" ", "").replace("-", "")
+        if not (card.isdigit() and len(card) == 16):
+            await message.answer(
+                "⚠️ Plastik karta 16 ta raqamdan iborat bo'lishi kerak. Qaytadan kiriting:" if lang == "uz"
+                else "⚠️ Номер карты должен состоять из 16 цифр. Введите заново:"
+            )
+            return
+
+        await db_update_card(uid, card)
+        await state.clear()
+
+        formatted_card = f"{card[:4]} {card[4:8]} {card[8:12]} {card[12:]}"
+        success_msg = (
+            f"✅ <b>Plastik kartangiz muvaffaqiyatli yangilandi!</b>\n\n"
+            f"💳 Yangi karta: <code>{formatted_card}</code>\n\n"
+            f"Endi pul yechishda mablag'ingiz ushbu kartangizga o'tkazib beriladi."
+        ) if lang == "uz" else (
+            f"✅ <b>Номер карты успешно обновлен!</b>\n\n"
+            f"💳 Новая карта: <code>{formatted_card}</code>\n\n"
+            f"Теперь средства будут переводиться на эту карту."
+        )
+        await message.answer(success_msg, reply_markup=user_main_kb(lang, uid))
+    except Exception as e:
+        logger.error(f"change_card_save xatosi: {e}")
 
 
 @router.callback_query(F.data == "change_lang_menu")
@@ -1783,7 +1869,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         drv_car_n = user.get("car_number") or ""
         drv_yandex = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
 
-        # Admin uchun qulay boshqaruv tugmalari
         adm_kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -2287,6 +2372,13 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
                 fail_count += 1
 
     await status_msg.edit_text(f"📢 <b>Xabar tarqatish yakunlandi!</b>\n\n✅ Yetkazildi: <b>{sent_count} ta</b>\n❌ Yetib bormadi: <b>{fail_count} ta</b>")
+    
+    # Xabar tarqatilgach adminni avtomatik admin boshqaruv paneliga qaytarish
+    admin_lang = await get_lang(message.from_user.id)
+    await message.answer(
+        "🛠 <b>Admin Boshqaruv Paneli:</b>" if admin_lang == "uz" else "🛠 <b>Панель Администратора:</b>",
+        reply_markup=admin_main_kb(admin_lang)
+    )
 
 
 @admin_router.message(F.text.in_(["👥 Haydovchilar", "👥 Водители"]))
@@ -2323,6 +2415,44 @@ async def back_to_user_menu(message: Message, state: FSMContext) -> None:
         await message.answer("Asosiy menyu:" if lang == "uz" else "Главное меню:", reply_markup=user_main_kb(lang, message.from_user.id))
     except Exception as e:
         logger.error(f"back_to_user_menu xatosi: {e}")
+
+
+# --- NOMA'LUM BUYRUQLAR VA XATO XABARLAR UCHUN JAVOB (FALLBACK) ---
+
+@router.message(StateFilter("*"))
+async def unknown_message_fallback(message: Message, state: FSMContext) -> None:
+    try:
+        uid = message.from_user.id
+        lang = await get_lang(uid)
+        user = await db_get_user(uid)
+
+        # Agar admin xato buyruq yozsa
+        if uid in ADMIN_IDS or uid == MANAGER_TG_ID:
+            await message.answer(
+                "⚠️ <b>Noma'lum buyruq kiritildi!</b>\n\nIltimos, quyidagi menyudan kerakli bo'limni tanlang:" if lang == "uz"
+                else "⚠️ <b>Неизвестная команда!</b>\n\nПожалуйста, выберите нужный раздел из меню ниже:",
+                reply_markup=user_main_kb(lang, uid)
+            )
+            return
+
+        if user and user.get("is_registered") == 1:
+            await message.answer(
+                "⚠️ <b>Noma'lum buyruq yoki xato xabar yuborildi!</b>\n\n"
+                "Iltimos, quyidagi asosiy menyudan kerakli tugmani bosing:" if lang == "uz"
+                else "⚠️ <b>Неизвестная команда или некорректное сообщение!</b>\n\n"
+                "Пожалуйста, нажмите нужную кнопку в главном меню ниже:",
+                reply_markup=user_main_kb(lang, uid)
+            )
+        else:
+            await message.answer(
+                "⚠️ <b>Noma'lum buyruq!</b>\n\n"
+                "Iltimos, avval ro'yxatdan o'ting yoki /start buyrug'ini yuboring:" if lang == "uz"
+                else "⚠️ <b>Неизвестная команда!</b>\n\n"
+                "Пожалуйста, пройдите регистрацию или отправьте команду /start:",
+                reply_markup=register_reply_kb(lang)
+            )
+    except Exception as e:
+        logger.error(f"unknown_message_fallback xatosi: {e}")
 
 
 # --- OYLIK SCHEDULER & WEB RUNNER ---
