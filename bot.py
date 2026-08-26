@@ -415,6 +415,35 @@ async def db_update_withdrawal_status(w_id: int, status: str):
         logger.error(f"db_update_withdrawal_status xatosi: {e}")
 
 
+async def db_find_driver_by_phone(phone: str) -> Optional[dict]:
+    clean_digits = re.sub(r"\D", "", str(phone or ""))
+    if len(clean_digits) < 7:
+        return None
+    core_phone = clean_digits[-9:]
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    SELECT * FROM users 
+                    WHERE is_registered = 1 AND (phone LIKE $1 OR phone LIKE $2)
+                    LIMIT 1
+                """, f"%{core_phone}%", f"%{clean_digits}%")
+                return dict(row) if row else None
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("""
+                SELECT * FROM users 
+                WHERE is_registered = 1 AND (phone LIKE ? OR phone LIKE ?)
+                LIMIT 1
+            """, (f"%{core_phone}%", f"%{clean_digits}%")).fetchone()
+            conn.close()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"db_find_driver_by_phone xatosi: {e}")
+        return None
+
+
 async def db_get_all_registered_drivers() -> List[dict]:
     try:
         if db_pool:
@@ -1106,6 +1135,17 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
             await search_msg.delete()
         except Exception:
             pass
+
+        if not y_driver:
+            db_driver = await db_find_driver_by_phone(phone)
+            if db_driver:
+                y_driver = {
+                    "full_name": db_driver.get("full_name") or "Haydovchi",
+                    "car_model": db_driver.get("car_model") or "Chevrolet Cobalt",
+                    "car_number": db_driver.get("car_number") or "Nomalum",
+                    "id": db_driver.get("yandex_driver_id"),
+                    "balance": float(db_driver.get("balance", 0.0) or 0.0)
+                }
 
         if y_driver:
             full_name = y_driver.get("full_name") or "Haydovchi"
@@ -1953,6 +1993,45 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
 
 
 # --- ADMIN PANEL ---
+
+@admin_router.message(Command("yandex_test"))
+async def cmd_yandex_test(message: Message) -> None:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
+        return
+    msg = await message.answer("⏳ <i>Yandex API tekshirilmoqda...</i>")
+    park_id = YANDEX_PARK_ID
+    api_key = YANDEX_API_KEY
+    client_id = YANDEX_CLIENT_ID
+    
+    report = (
+        f"📊 <b>YANDEX FLEET DIAGNOSTIKA:</b>\n\n"
+        f"🔹 <b>PARK_ID:</b> <code>{park_id or 'KIRITILMAGAN!'}</code>\n"
+        f"🔹 <b>API_KEY:</b> <code>{api_key[:6]}...{api_key[-4:] if len(api_key)>10 else ''}</code> (Uzunligi: {len(api_key)})\n"
+        f"🔹 <b>CLIENT_ID:</b> <code>{client_id or 'Avtomatik (taxi/park/...)'}</code>\n\n"
+    )
+    
+    drivers, err = await yandex_api.get_all_drivers(limit=10, force_refresh=True)
+    if drivers:
+        report += (
+            f"✅ <b>ULANISH MUVAFFAQIYATLI!</b>\n\n"
+            f"🚕 Jami yuklangan haydovchilar: <b>{len(drivers)} ta</b>\n\n"
+            f"<b>Namunaviy haydovchi:</b>\n"
+        )
+        sample = yandex_api._normalize_driver_data(drivers[0])
+        report += (
+            f"👤 Ism: <b>{sample['full_name']}</b>\n"
+            f"📱 Tel: <code>{sample['phone']}</code>\n"
+            f"🚗 Avto: <b>{sample['car_model']} ({sample['car_number']})</b>\n"
+            f"💰 Balans: <b>{fmt_sum(sample['balance'])} som</b>"
+        )
+    else:
+        report += (
+            f"❌ <b>ULANISHDA XATOLIK!</b>\n\n"
+            f"📌 <b>Yandex javobi:</b>\n<code>{err}</code>\n\n"
+            f"💡 <i>Iltimos, Render Environment bo'limida YANDEX_API_KEY va YANDEX_PARK_ID to'g'ri kiritilganini tekshiring.</i>"
+        )
+    await msg.edit_text(report)
+
 
 @admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]), StateFilter("*"))
 async def admin_open(message: Message, state: FSMContext) -> None:
