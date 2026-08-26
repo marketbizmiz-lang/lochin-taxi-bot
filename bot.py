@@ -71,10 +71,10 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Pul yechish qoidalari (20 000 so'm depozit ushlab qolinadi)
+# Pul yechish qoidalari (20 000 so'm depozit ushlab qolinadi, 0% komissiya)
 MIN_DEPOSIT_BALANCE = int(os.getenv("MIN_DEPOSIT_BALANCE", "20000"))
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "10000"))
-COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "2.0"))
+COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "0.0"))
 
 
 def fmt_sum(val: Any) -> str:
@@ -695,9 +695,17 @@ class YandexFleetAPI:
         balance = 0.0
         if accounts:
             try:
-                balance = float(accounts[0].get("balance", 0.0))
+                total_b = 0.0
+                for acc in accounts:
+                    b_val = acc.get("balance")
+                    if b_val is not None:
+                        total_b += float(b_val)
+                balance = total_b
             except Exception:
-                balance = 0.0
+                try:
+                    balance = float(accounts[0].get("balance", 0.0))
+                except Exception:
+                    balance = 0.0
 
         phones = prof.get("phones", [])
         primary_phone = phones[0] if phones else ""
@@ -712,23 +720,74 @@ class YandexFleetAPI:
             "raw": raw_driver
         }
 
-    async def get_driver_balance(self, yandex_driver_id: str) -> Optional[float]:
-        if not self._is_configured() or not yandex_driver_id:
+    async def get_driver_live_info(self, yandex_driver_id: Optional[str] = None, phone: str = "") -> Optional[dict]:
+        """
+        Har safar Yandex Fleet API ga to'g'ridan-to'g'ri real-time so'rov yuboradi.
+        Haydovchining o'sha daqiqadagi ayni damdagi jonli balansini qaytaradi.
+        """
+        if not self._is_configured():
             return None
-        url = f"{self.active_base_url}/v1/parks/driver-profiles/list"
-        payload = {"query": {"park": {"id": self.park_id}, "driver": {"id": [yandex_driver_id]}}, "limit": 1}
-        try:
+
+        # 1. Driver ID bo'yicha qidirish
+        if yandex_driver_id:
+            payload = {
+                "query": {
+                    "park": {"id": self.park_id},
+                    "driver": {"id": [yandex_driver_id]}
+                },
+                "limit": 1
+            }
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self._get_headers(), json=payload, timeout=12) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        drivers = data.get("driver_profiles", [])
-                        if drivers:
-                            norm = self._normalize_driver_data(drivers[0])
-                            return norm["balance"]
-        except Exception as e:
-            logger.error(f"Yandex get_driver_balance xatosi: {e}")
+                for base_url in [self.active_base_url] + [u for u in YANDEX_CANDIDATE_URLS if u != self.active_base_url]:
+                    url = f"{base_url}/v1/parks/driver-profiles/list"
+                    try:
+                        headers = self._get_headers()
+                        async with session.post(url, headers=headers, json=payload, timeout=10) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                drivers = data.get("driver_profiles", [])
+                                if drivers:
+                                    norm = self._normalize_driver_data(drivers[0])
+                                    logger.info(f"Yandex LIVE balans (ID: {yandex_driver_id}): {norm['full_name']} -> {norm['balance']} UZS")
+                                    return norm
+                    except Exception as e:
+                        logger.warning(f"get_driver_live_info ID error: {e}")
+
+        # 2. Telefon raqam bo'yicha qidirish
+        if phone:
+            clean_digits = re.sub(r"\D", "", str(phone or ""))
+            if len(clean_digits) >= 7:
+                core_phone = clean_digits[-9:]
+                payload = {
+                    "query": {
+                        "park": {"id": self.park_id}
+                    },
+                    "limit": 1000
+                }
+                async with aiohttp.ClientSession() as session:
+                    for base_url in [self.active_base_url] + [u for u in YANDEX_CANDIDATE_URLS if u != self.active_base_url]:
+                        url = f"{base_url}/v1/parks/driver-profiles/list"
+                        try:
+                            headers = self._get_headers()
+                            async with session.post(url, headers=headers, json=payload, timeout=15) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    drivers = data.get("driver_profiles", [])
+                                    for drv in drivers:
+                                        phones = drv.get("driver_profile", {}).get("phones", [])
+                                        for p in phones:
+                                            p_digits = re.sub(r"\D", "", str(p))
+                                            if len(p_digits) >= 7 and p_digits[-9:] == core_phone:
+                                                norm = self._normalize_driver_data(drv)
+                                                logger.info(f"Yandex LIVE balans (Tel: {core_phone}): {norm['full_name']} -> {norm['balance']} UZS")
+                                                return norm
+                        except Exception as e:
+                            logger.warning(f"get_driver_live_info Phone error: {e}")
         return None
+
+    async def get_driver_balance(self, yandex_driver_id: str) -> Optional[float]:
+        info = await self.get_driver_live_info(yandex_driver_id=yandex_driver_id)
+        return info["balance"] if info else None
 
     async def create_transaction(self, yandex_driver_id: str, amount: float, description: str) -> bool:
         if not self._is_configured() or not yandex_driver_id:
@@ -894,13 +953,13 @@ TEXTS = {
         "cancel": "❌ Bekor qilish",
         "send_phone_btn": "📱 Telefon raqamni yuborish",
         "action_cancelled": "❌ Amaliyot bekor qilindi.",
-        "balance_detail": f"💰 <b>{{bot_name}} da Balans va Daromad:</b>\n\n💵 <b>Naqd tushum:</b> 0 som\n💳 <b>Karta tushum (Yandex):</b> <b>{{balance}} som</b>\n🔒 <b>Depozit (Muzlatilgan):</b> <b>{{blocked}} som</b>\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Kartaga yechish mumkin:</b> <b>{{avail}} som</b>\n\n🚕 Yandex Pro holati: <b>{{y_status}}</b>",
-        "withdraw_min_err": f"❌ Minimal yechish summasi: {MIN_WITHDRAWAL:,} som (Balansda 20 000 som depozit qolishi shart)",
-        "withdraw_no_money": f"❌ Balansingizda yechish uchun yetarli mablag mavjud emas!\n(Hisobingizda minimal 20 000 som depozit saqlanadi)",
-        "withdraw_ask": f"💸 <b>Pul yechish (24/7):</b>\n\n🔹 Yechish mumkin: <b>{{avail}} som</b>\n🔹 Depozitda qoladi: <b>{MIN_DEPOSIT_BALANCE:,} som</b>\n🔹 Komissiya: <b>{{comm}}%</b>\n\nYechmoqchi bolgan summani kiriting (Masalan: <i>50000</i>):",
-        "withdraw_confirm": "💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n💰 Yechilayotgan summa: <b>{amount} som</b>\n📊 Komissiya ({comm}%): <b>{comm_amount} som</b>\n💵 Kartaga tushadi: <b>{net_amount} som</b>\n💳 Karta: <code>{card}</code>",
-        "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n📞 <b>Menejer telefoni:</b> {SUPPORT_PHONE_DISPLAY}\n\nKerakli bolimni tanlang:",
-        "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yolda qoldim)",
+        "balance_detail": f"💰 <b>{{bot_name}} da Balans va Daromad:</b>\n\n💵 <b>Naqd tushum:</b> 0 so'm\n💳 <b>Karta tushum (Yandex):</b> <b>{{balance}} so'm</b>\n🔒 <b>Depozit (Muzlatilgan):</b> <b>{{blocked}} so'm</b>\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Kartaga yechish mumkin:</b> <b>{{avail}} so'm</b>\n\n🚕 Yandex Pro holati: <b>{{y_status}}</b>",
+        "withdraw_min_err": f"❌ Minimal yechish summasi: {MIN_WITHDRAWAL:,} so'm (Balansda 20 000 so'm depozit qolishi shart)",
+        "withdraw_no_money": f"❌ Balansingizda yechish uchun yetarli mablag' mavjud emas!\n(Hisobingizda minimal 20 000 so'm depozit saqlanadi)",
+        "withdraw_ask": "💸 <b>Pul yechish (24/7):</b>\n\n💰 <b>Jami balansingiz:</b> <b>{total_bal} so'm</b>\n🔒 <b>Depozitda qoladi:</b> <b>{deposit} so'm</b>\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Yechish mumkin:</b> <b>{avail} so'm</b>\n\nYechmoqchi bo'lgan summani kiriting (Masalan: <i>50000</i>):",
+        "withdraw_confirm": "💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n💰 Yechilayotgan summa: <b>{amount} so'm</b>\n💵 Kartaga to'liq tushadi: <b>{net_amount} so'm</b>\n💳 Karta: <code>{card}</code>",
+        "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n📞 <b>Menejer telefoni:</b> {SUPPORT_PHONE_DISPLAY}\n\nKerakli bo'limni tanlang:",
+        "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yo'lda qoldim)",
         "sos_btn_msg": "✍️ Menejerga xabar / Shikoyat yozish",
         "sos_btn_chat": "💬 Menejer bilan shaxsiy chat",
         "sos_ask_loc": "📍 <b>Lokatsiya yoki joylashuvingizni yuboring:</b>\n\n📱 <b>Mobil telefonda:</b> Pastdagi tugmani bosing.\n💻 <b>Kompyuterda (Desktop):</b> Manzilingizni shu yerga yozib yuboring.\n\n<i>Bekor qilish uchun '❌ Bekor qilish' tugmasini bosing.</i>",
@@ -932,8 +991,8 @@ TEXTS = {
         "balance_detail": f"💰 <b>Баланс и Доход в {{bot_name}}:</b>\n\n💵 <b>Наличные:</b> 0 сум\n💳 <b>Безналичные (Яндекс):</b> <b>{{balance}} сум</b>\n🔒 <b>Депозит (Неснижаемый):</b> <b>{{blocked}} сум</b>\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Доступно к выводу:</b> <b>{{avail}} сум</b>\n\n🚕 Статус Яндекс Про: <b>{{y_status}}</b>",
         "withdraw_min_err": f"❌ Минимальная сумма вывода: {MIN_WITHDRAWAL:,} сум (Неснижаемый депозит 20 000 сум)",
         "withdraw_no_money": f"❌ Недостаточно средств для вывода!\n(Неснижаемый остаток депозита: 20 000 сум)",
-        "withdraw_ask": f"💸 <b>Вывод средств (24/7):</b>\n\n🔹 Доступно: <b>{{avail}} сум</b>\n🔹 Неснижаемый депозит: <b>{MIN_DEPOSIT_BALANCE:,} сум</b>\n🔹 Комиссия: <b>{{comm}}%</b>\n\nВведите сумму для вывода (Пример: <i>50000</i>):",
-        "withdraw_confirm": "💳 <b>Подтверждаете вывод средств?</b>\n\n💰 Сумма: <b>{amount} сум</b>\n📊 Комиссия ({comm}%): <b>{comm_amount} сум</b>\n💵 К зачислению: <b>{net_amount} сум</b>\n💳 Карта: <code>{card}</code>",
+        "withdraw_ask": "💸 <b>Вывод средств (24/7):</b>\n\n💰 <b>Общий баланс:</b> <b>{total_bal} сум</b>\n🔒 <b>Неснижаемый депозит:</b> <b>{deposit} сум</b>\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Доступно к выводу:</b> <b>{avail} сум</b>\n\nВведите сумму для вывода (Пример: <i>50000</i>):",
+        "withdraw_confirm": "💳 <b>Подтверждаете вывод средств?</b>\n\n💰 Сумма: <b>{amount} сум</b>\n💵 К зачислению: <b>{net_amount} сум</b>\n💳 Карта: <code>{card}</code>",
         "sos_title": f"🆘 <b>Центр Экстренной Помощи</b>\n\n📞 <b>Телефон менеджера:</b> {SUPPORT_PHONE_DISPLAY}\n\nВыберите нужный раздел:",
         "sos_btn_loc": "📍 Отправить локацию (ДТП / В пути)",
         "sos_btn_msg": "✍️ Написать менеджеру / Жалоба",
@@ -1217,7 +1276,7 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
                 f"✅ <b>Siz Yandex Pro taksoparkimizda topildingiz!</b>\n\n"
                 f"👤 F.I.O: <b>{full_name}</b>\n"
                 f"🚗 Avtomobil: <b>{car_model} ({car_number})</b>\n"
-                f"💰 Yandex Balans: <b>{y_bal} som</b>\n\n"
+                f"💰 Yandex Balans: <b>{y_bal} so'm</b>\n\n"
                 f"💳 Daromadingizni yechib olish uchun <b>plastik karta raqamingizni kiriting</b> (16 ta raqam):"
             ) if lang == "uz" else (
                 f"✅ <b>Вы найдены в базе Яндекс Про таксопарка!</b>\n\n"
@@ -1271,7 +1330,7 @@ async def reg_step_name(message: Message, state: FSMContext) -> None:
                 f"✅ <b>Siz Yandex Pro taksoparkimizda topildingiz!</b>\n\n"
                 f"👤 F.I.O: <b>{full_name}</b>\n"
                 f"🚗 Avtomobil: <b>{car_model} ({car_number})</b>\n"
-                f"💰 Yandex Balans: <b>{y_bal} som</b>\n\n"
+                f"💰 Yandex Balans: <b>{y_bal} so'm</b>\n\n"
                 f"💳 Daromadingizni yechib olish uchun <b>plastik karta raqamingizni kiriting</b> (16 ta raqam):"
             ) if lang == "uz" else (
                 f"✅ <b>Вы найдены в базе Яндекс Про таксопарка!</b>\n\n"
@@ -1382,20 +1441,26 @@ async def balance_handler(message: Message) -> None:
         uid = message.from_user.id
         user = await db_get_user(uid)
         if not user or user.get("is_registered") != 1:
-            await message.answer("Iltimos, avval royxatdan oting: /start", reply_markup=register_reply_kb("uz"))
+            await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
             return
 
         lang = user.get("language", "uz")
         cur_bal = float(user.get("balance", 0.0) or 0.0)
+
+        # Har safar to'g'ridan-to'g'ri real-time Yandex API dan balans olinadi
+        live_info = await yandex_api.get_driver_live_info(
+            yandex_driver_id=user.get("yandex_driver_id"),
+            phone=user.get("phone", "")
+        )
+        if live_info:
+            cur_bal = float(live_info["balance"])
+            if not user.get("yandex_driver_id") and live_info.get("id"):
+                user["yandex_driver_id"] = live_info["id"]
+            await db_update_balance(uid, cur_bal)
+
         y_status = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
-
-        if user.get("yandex_driver_id"):
-            live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
-            if live_bal is not None:
-                cur_bal = live_bal
-                await db_update_balance(uid, live_bal)
-
         avail = max(0.0, cur_bal - MIN_DEPOSIT_BALANCE)
+        
         await message.answer(
             t(lang, "balance_detail",
               bot_name=BOT_NAME,
@@ -1546,34 +1611,42 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
         uid = message.from_user.id
         user = await db_get_user(uid)
         if not user or user.get("is_registered") != 1:
-            await message.answer("Iltimos, avval royxatdan oting: /start", reply_markup=register_reply_kb("uz"))
+            await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
             return
 
         lang = user.get("language", "uz")
         cur_bal = float(user.get("balance", 0.0) or 0.0)
 
-        if user.get("yandex_driver_id"):
-            live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
-            if live_bal is not None:
-                await db_update_balance(uid, live_bal)
-                cur_bal = live_bal
-                user["balance"] = live_bal
+        # Har safar to'g'ridan-to'g'ri real-time Yandex API dan jonli balans olinadi
+        live_info = await yandex_api.get_driver_live_info(
+            yandex_driver_id=user.get("yandex_driver_id"),
+            phone=user.get("phone", "")
+        )
+        if live_info:
+            cur_bal = float(live_info["balance"])
+            if not user.get("yandex_driver_id") and live_info.get("id"):
+                user["yandex_driver_id"] = live_info["id"]
+            await db_update_balance(uid, cur_bal)
+            user["balance"] = cur_bal
 
-        avail = max(0.0, cur_bal - MIN_DEPOSIT_BALANCE)
+        deposit = MIN_DEPOSIT_BALANCE
+        avail = max(0.0, cur_bal - deposit)
 
         if avail < MIN_WITHDRAWAL:
             msg = (
                 f"❌ <b>Balansingizda yechish uchun yetarli mablag' mavjud emas!</b>\n\n"
-                f"💰 Umumiy balans: <b>{fmt_sum(cur_bal)} som</b>\n"
-                f"🔒 Depozit (ushlab qolinadi): <b>{fmt_sum(MIN_DEPOSIT_BALANCE)} som</b>\n"
-                f"🔹 Yechish mumkin: <b>{fmt_sum(avail)} som</b>\n"
-                f"🔹 Minimal yechish: <b>{fmt_sum(MIN_WITHDRAWAL)} som</b>"
+                f"💰 <b>Jami balansingiz:</b> <b>{fmt_sum(cur_bal)} so'm</b>\n"
+                f"🔒 <b>Depozitda qoladi:</b> <b>{fmt_sum(deposit)} so'm</b>\n"
+                f"➖➖➖➖➖➖➖➖➖➖\n"
+                f"🔹 <b>Yechish mumkin:</b> <b>{fmt_sum(avail)} so'm</b>\n"
+                f"🔹 <b>Minimal yechish:</b> <b>{fmt_sum(MIN_WITHDRAWAL)} so'm</b>"
             ) if lang == "uz" else (
                 f"❌ <b>Недостаточно средств для вывода!</b>\n\n"
-                f"💰 Общий баланс: <b>{fmt_sum(cur_bal)} сум</b>\n"
-                f"🔒 Депозит (неснижаемый): <b>{fmt_sum(MIN_DEPOSIT_BALANCE)} сум</b>\n"
-                f"🔹 Доступно к выводу: <b>{fmt_sum(avail)} сум</b>\n"
-                f"🔹 Мин. сумма: <b>{fmt_sum(MIN_WITHDRAWAL)} сум</b>"
+                f"💰 <b>Общий баланс:</b> <b>{fmt_sum(cur_bal)} сум</b>\n"
+                f"🔒 <b>Неснижаемый депозит:</b> <b>{fmt_sum(deposit)} сум</b>\n"
+                f"➖➖➖➖➖➖➖➖➖➖\n"
+                f"🔹 <b>Доступно к выводу:</b> <b>{fmt_sum(avail)} сум</b>\n"
+                f"🔹 <b>Мин. сумма:</b> <b>{fmt_sum(MIN_WITHDRAWAL)} сум</b>"
             )
             await message.answer(msg, reply_markup=user_main_kb(lang, uid))
             return
@@ -1581,9 +1654,9 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
         await state.set_state(WithdrawStates.amount)
         await message.answer(
             t(lang, "withdraw_ask",
-              avail=fmt_sum(avail),
-              min_w=fmt_sum(MIN_WITHDRAWAL),
-              comm=COMMISSION_PERCENT),
+              total_bal=fmt_sum(cur_bal),
+              deposit=fmt_sum(deposit),
+              avail=fmt_sum(avail)),
             reply_markup=cancel_kb(lang)
         )
     except Exception as e:
@@ -1612,8 +1685,10 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
 
         if amount > avail:
             await message.answer(
-                f"❌ Mablag yetarli emas!\n\n"
-                f"Depozitdan (20 000 som) tashqari siz eng kopi bilan <b>{fmt_sum(avail)} som</b> yecha olasiz."
+                f"❌ Mablag' yetarli emas!\n\n"
+                f"💰 Jami balansingiz: <b>{fmt_sum(cur_bal)} so'm</b>\n"
+                f"🔒 Depozit: <b>{fmt_sum(MIN_DEPOSIT_BALANCE)} so'm</b>\n"
+                f"✅ Eng ko'pi bilan <b>{fmt_sum(avail)} so'm</b> yecha olasiz."
             )
             return
 
@@ -1639,8 +1714,6 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         await message.answer(
             t(lang, "withdraw_confirm",
               amount=fmt_sum(amount),
-              comm=COMMISSION_PERCENT,
-              comm_amount=fmt_sum(comm),
               net_amount=fmt_sum(net),
               card=card_val),
             reply_markup=kb
@@ -1686,10 +1759,10 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
         msg = (
             f"✅ <b>Pul yechish arizangiz ma'muriyatga yuborildi!</b>\n\n"
-            f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} som</b>\n"
-            f"💵 Kartaga tushadi: <b>{fmt_sum(net_amount)} som</b>\n"
+            f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
+            f"💵 Kartaga tushadi: <b>{fmt_sum(net_amount)} so'm</b>\n"
             f"💳 Karta: <code>{card}</code>\n"
-            f"🔒 Depozitda qoladigan: <b>{fmt_sum(remaining)} som</b>\n\n"
+            f"🔒 Depozitda qoladigan: <b>{fmt_sum(remaining)} so'm</b>\n\n"
             f"<i>Mablag' tez orada kartangizga o'tkazib beriladi.</i>"
         ) if lang == "uz" else (
             f"✅ <b>Заявка на вывод средств отправлена администрации!</b>\n\n"
@@ -1710,6 +1783,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         drv_car_n = user.get("car_number") or ""
         drv_yandex = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
 
+        # Admin uchun qulay boshqaruv tugmalari
         adm_kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1727,13 +1801,12 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
             f"🆔 <b>POSITION:</b> <code>{drv_pos}</code>\n"
             f"👤 <b>Haydovchi:</b> <b>{drv_name}</b>\n"
             f"📱 <b>Telefon:</b> <code>{drv_phone}</code>\n"
-            f"🚗 <b>Avtomobil:</b> <b>{drv_car}</b>\n"
+            f"🚗 <b>Avtomobil:</b> <b>{drv_car_m} ({drv_car_n})</b>\n"
             f"💳 <b>Karta:</b> <code>{card}</code> (Nusxa olish uchun bosing)\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"💰 <b>Yechilayotgan summa:</b> <b>{fmt_sum(amount)} som</b>\n"
-            f"📊 <b>Komissiya ({COMMISSION_PERCENT}%):</b> <b>{fmt_sum(commission)} som</b>\n"
-            f"💵 <b>Kartaga to'lanadigan sof summa:</b> <b>{fmt_sum(net_amount)} som</b>\n"
-            f"🔒 <b>Depozitda qoladigan:</b> <b>{fmt_sum(remaining)} som</b> (Min. depozit: 20 000 som)\n"
+            f"💰 <b>Yechilayotgan summa:</b> <b>{fmt_sum(amount)} so'm</b>\n"
+            f"💵 <b>Kartaga to'lanadigan sof summa:</b> <b>{fmt_sum(net_amount)} so'm</b>\n"
+            f"🔒 <b>Depozitda qoladigan:</b> <b>{fmt_sum(remaining)} so'm</b> (Min. depozit: 20 000 so'm)\n"
             f"🚕 <b>Yandex Pro:</b> {drv_yandex}"
         )
 
@@ -1788,8 +1861,8 @@ async def admin_handle_withdrawal_decision(callback: CallbackQuery) -> None:
             try:
                 msg_for_drv = (
                     f"✅ <b>Mablag' kartangizga o'tkazib berildi!</b>\n\n"
-                    f"💰 Yechilgan: <b>{fmt_sum(amount)} som</b>\n"
-                    f"💵 Kartangizga tushdi: <b>{fmt_sum(net_amount)} som</b>\n"
+                    f"💰 Yechilgan: <b>{fmt_sum(amount)} so'm</b>\n"
+                    f"💵 Kartangizga tushdi: <b>{fmt_sum(net_amount)} so'm</b>\n"
                     f"💳 Karta: <code>{card}</code>\n\n"
                     f"<i>{BOT_NAME} bilan ishlaganingiz uchun rahmat! 🤝</i>"
                 ) if drv_lang == "uz" else (
@@ -2070,7 +2143,7 @@ async def cmd_yandex_test(message: Message) -> None:
             f"👤 Ism: <b>{sample['full_name']}</b>\n"
             f"📱 Tel: <code>{sample['phone']}</code>\n"
             f"🚗 Avto: <b>{sample['car_model']} ({sample['car_number']})</b>\n"
-            f"💰 Balans: <b>{fmt_sum(sample['balance'])} som</b>"
+            f"💰 Balans: <b>{fmt_sum(sample['balance'])} so'm</b>"
         )
     else:
         report += (
@@ -2101,8 +2174,8 @@ async def admin_stats_handler(message: Message) -> None:
         f"🚕 Royxatdan otgan haydovchilar: <b>{stats['registered_drivers']} ta</b>\n"
         f"🔗 Yandex Pro ulangan haydovchilar: <b>{stats['yandex_linked']} ta</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
-        f"💸 Jami yechilgan mablag: <b>{fmt_sum(stats['total_withdrawn'])} som</b>\n"
-        f"📈 Taksopark komissiyasi: <b>{fmt_sum(stats['total_comm'])} som</b>"
+        f"💸 Jami yechilgan mablag: <b>{fmt_sum(stats['total_withdrawn'])} so'm</b>\n"
+        f"📈 Taksopark komissiyasi: <b>{fmt_sum(stats['total_comm'])} so'm</b>"
     )
     await message.answer(text)
 
@@ -2237,7 +2310,7 @@ async def admin_list_drivers(message: Message) -> None:
         text += (
             f"🆔 <code>{drv_pos}</code> — <b>{drv_name}</b>\n"
             f"📱 {drv_phone} | 🚗 {drv_car_m} ({drv_car_n})\n"
-            f"💰 Balans: <b>{drv_bal} som</b>\n---------------------------\n"
+            f"💰 Balans: <b>{drv_bal} so'm</b>\n---------------------------\n"
         )
     await message.answer(text)
 
