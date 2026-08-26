@@ -137,8 +137,8 @@ async def init_database():
                         total_orders INT DEFAULT 0,
                         total_earnings NUMERIC DEFAULT 0,
                         last_activity TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                        created_at TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL DEFAULT ''
                     );
                     CREATE TABLE IF NOT EXISTS withdrawals (
                         id SERIAL PRIMARY KEY,
@@ -150,10 +150,39 @@ async def init_database():
                         status TEXT NOT NULL DEFAULT 'pending',
                         payout_method TEXT DEFAULT 'manual',
                         ext_tx_id TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL
+                        created_at TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL DEFAULT ''
                     );
                 """)
+                
+                # Barcha ustunlarni avtomatik qo'shish (Auto-migration)
+                cols_to_add = [
+                    ("username", "TEXT"),
+                    ("full_name", "TEXT"),
+                    ("phone", "TEXT"),
+                    ("card_number", "TEXT"),
+                    ("car_model", "TEXT"),
+                    ("car_number", "TEXT"),
+                    ("position", "TEXT"),
+                    ("language", "TEXT NOT NULL DEFAULT 'uz'"),
+                    ("balance", "NUMERIC DEFAULT 0"),
+                    ("blocked_balance", "NUMERIC DEFAULT 0"),
+                    ("is_registered", "INT DEFAULT 0"),
+                    ("is_blocked", "INT DEFAULT 0"),
+                    ("yandex_driver_id", "TEXT"),
+                    ("referrer_id", "BIGINT"),
+                    ("total_orders", "INT DEFAULT 0"),
+                    ("total_earnings", "NUMERIC DEFAULT 0"),
+                    ("last_activity", "TEXT"),
+                    ("created_at", "TEXT DEFAULT ''"),
+                    ("updated_at", "TEXT DEFAULT ''"),
+                ]
+                for col_name, col_type in cols_to_add:
+                    try:
+                        await conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name} {col_type};")
+                    except Exception:
+                        pass
+
                 try:
                     await conn.execute("ALTER TABLE users ALTER COLUMN telegram_id TYPE BIGINT;")
                     await conn.execute("ALTER TABLE users ALTER COLUMN referrer_id TYPE BIGINT;")
@@ -188,8 +217,8 @@ async def init_database():
                     total_orders INTEGER DEFAULT 0,
                     total_earnings REAL DEFAULT 0,
                     last_activity TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    created_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
                 )
             """)
             conn.execute("""
@@ -203,10 +232,29 @@ async def init_database():
                     status TEXT NOT NULL DEFAULT 'pending',
                     payout_method TEXT DEFAULT 'manual',
                     ext_tx_id TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    created_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
                 )
             """)
+            
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(users)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            for col_name, col_type in [
+                ("username", "TEXT"), ("full_name", "TEXT"), ("phone", "TEXT"),
+                ("card_number", "TEXT"), ("car_model", "TEXT"), ("car_number", "TEXT"),
+                ("position", "TEXT"), ("language", "TEXT DEFAULT 'uz'"),
+                ("balance", "REAL DEFAULT 0"), ("blocked_balance", "REAL DEFAULT 0"),
+                ("is_registered", "INTEGER DEFAULT 0"), ("is_blocked", "INTEGER DEFAULT 0"),
+                ("yandex_driver_id", "TEXT"), ("referrer_id", "INTEGER"),
+                ("total_orders", "INTEGER DEFAULT 0"), ("total_earnings", "REAL DEFAULT 0"),
+                ("last_activity", "TEXT"), ("created_at", "TEXT"), ("updated_at", "TEXT")
+            ]:
+                if col_name not in existing_cols:
+                    try:
+                        conn.execute(f"ALTER TABLE users ADD COLUMN {col_name} {col_type}")
+                    except Exception:
+                        pass
             conn.commit()
             conn.close()
             logger.info("SQLite bazasi tayyor!")
@@ -1679,7 +1727,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
             f"🆔 <b>POSITION:</b> <code>{drv_pos}</code>\n"
             f"👤 <b>Haydovchi:</b> <b>{drv_name}</b>\n"
             f"📱 <b>Telefon:</b> <code>{drv_phone}</code>\n"
-            f"🚗 <b>Avtomobil:</b> <b>{drv_car_m} ({drv_car_n})</b>\n"
+            f"🚗 <b>Avtomobil:</b> <b>{drv_car}</b>\n"
             f"💳 <b>Karta:</b> <code>{card}</code> (Nusxa olish uchun bosing)\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
             f"💰 <b>Yechilayotgan summa:</b> <b>{fmt_sum(amount)} som</b>\n"
@@ -2098,55 +2146,33 @@ async def admin_sync_all_drivers(message: Message) -> None:
             )
             return
 
-        count = 0
+        total_park_drivers = len(drivers)
+        synced_bot_drivers = 0
         now = utc_now_iso()
 
-        for raw_drv in drivers:
-            norm = yandex_api._normalize_driver_data(raw_drv)
-            phone = clean_phone_number(norm.get("phone", ""))
-            if not phone or len(phone) < 9:
-                continue
+        # Botda ro'yxatdan o'tgan haydovchilarning Yandex balansini yangilash
+        db_drivers = await db_get_all_registered_drivers()
+        for db_drv in db_drivers:
+            db_phone_clean = re.sub(r"\D", "", db_drv.get("phone", ""))[-9:]
+            db_y_id = db_drv.get("yandex_driver_id")
 
-            full_name = norm["full_name"]
-            car_model = norm["car_model"]
-            car_number = norm["car_number"]
-            y_id = norm["id"]
-            balance = norm["balance"]
-            count += 1
+            for raw_drv in drivers:
+                norm = yandex_api._normalize_driver_data(raw_drv)
+                y_phone_clean = re.sub(r"\D", "", norm.get("phone", ""))[-9:]
+                y_id = norm.get("id")
 
-            if db_pool:
-                async with db_pool.acquire() as conn:
-                    await conn.execute("""
-                        INSERT INTO users (telegram_id, full_name, phone, car_model, car_number, yandex_driver_id, balance, is_registered, last_activity, created_at, updated_at)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10)
-                        ON CONFLICT (telegram_id) DO UPDATE SET 
-                            full_name = EXCLUDED.full_name,
-                            car_model = EXCLUDED.car_model,
-                            car_number = EXCLUDED.car_number,
-                            yandex_driver_id = EXCLUDED.yandex_driver_id,
-                            balance = EXCLUDED.balance,
-                            updated_at = EXCLUDED.updated_at
-                    """, -count, full_name, phone, car_model, car_number, y_id, balance, now, now, now)
-            else:
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute("""
-                    INSERT INTO users (telegram_id, full_name, phone, car_model, car_number, yandex_driver_id, balance, is_registered, last_activity, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-                    ON CONFLICT(telegram_id) DO UPDATE SET
-                        full_name=excluded.full_name,
-                        car_model=excluded.car_model,
-                        car_number=excluded.car_number,
-                        yandex_driver_id=excluded.yandex_driver_id,
-                        balance=excluded.balance,
-                        updated_at=excluded.updated_at
-                """, (-count, full_name, phone, car_model, car_number, y_id, balance, now, now, now))
-                conn.commit()
-                conn.close()
+                if (db_y_id and db_y_id == y_id) or (db_phone_clean and db_phone_clean == y_phone_clean):
+                    synced_bot_drivers += 1
+                    tg_id = db_drv["telegram_id"]
+                    new_bal = norm["balance"]
+                    await db_update_balance(tg_id, new_bal)
+                    break
 
         await status_msg.edit_text(
-            f"✅ <b>Muvaffaqiyatli sinxronlandi!</b>\n\n"
-            f"🚕 Jami yuklangan haydovchilar: <b>{count} ta</b>\n"
-            f"Endi ushbu haydovchilar botga kirishi bilan tizim ularni bir zumda taniydi!"
+            f"✅ <b>Yandex Pro muvaffaqiyatli sinxronlandi!</b>\n\n"
+            f"🚕 Yandex taksoparkdagi jami haydovchilar: <b>{total_park_drivers} ta</b>\n"
+            f"🔗 Botdagi yangilangan haydovchilar: <b>{synced_bot_drivers} ta</b>\n\n"
+            f"<i>Endi haydovchilar botga kirishi bilan tizim ularni Yandex bazasidan darhol taniydi!</i>"
         )
     except Exception as e:
         logger.error(f"admin_sync_all_drivers xatosi: {e}")
