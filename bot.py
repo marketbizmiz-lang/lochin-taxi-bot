@@ -71,11 +71,9 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.yandex.ru/v1"
 
-BRB_API_URL = os.getenv("BRB_API_URL", "https://api.brb.uz/v1").strip()
-BRB_API_KEY = os.getenv("BRB_API_KEY", "").strip()
-BRB_MERCHANT_ID = os.getenv("BRB_MERCHANT_ID", "").strip()
-
-MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "30000"))
+# Pul yechish qoidalari (20 000 so'm depozit ushlab qolinadi)
+MIN_DEPOSIT_BALANCE = int(os.getenv("MIN_DEPOSIT_BALANCE", "20000"))
+MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "10000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "2.0"))
 
 
@@ -348,12 +346,11 @@ async def db_update_balance(telegram_id: int, balance: float):
 
 
 async def db_create_withdrawal(user_id: int, amount: float, commission: float, net_amount: float,
-                              card_number: str, status: str, payout_method: str, ext_tx_id: str = "") -> int:
+                              card_number: str, status: str = "pending", payout_method: str = "manual", ext_tx_id: str = "") -> int:
     now = utc_now_iso()
     try:
         if db_pool:
             async with db_pool.acquire() as conn:
-                await conn.execute("UPDATE users SET balance = balance - $1, updated_at = $2 WHERE id = $3", amount, now, user_id)
                 row = await conn.fetchrow("""
                     INSERT INTO withdrawals (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -362,7 +359,6 @@ async def db_create_withdrawal(user_id: int, amount: float, commission: float, n
                 return row["id"] if row else 0
         else:
             conn = sqlite3.connect(DB_PATH)
-            conn.execute("UPDATE users SET balance = balance - ?, updated_at = ? WHERE id = ?", (amount, now, user_id))
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO withdrawals (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at)
@@ -375,6 +371,48 @@ async def db_create_withdrawal(user_id: int, amount: float, commission: float, n
     except Exception as e:
         logger.error(f"db_create_withdrawal xatosi: {e}")
         return 0
+
+
+async def db_get_withdrawal(w_id: int) -> Optional[dict]:
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow("""
+                    SELECT w.*, u.telegram_id, u.full_name, u.phone, u.car_model, u.car_number, u.position, u.yandex_driver_id, u.language, u.balance as user_balance
+                    FROM withdrawals w
+                    JOIN users u ON w.user_id = u.id
+                    WHERE w.id = $1
+                """, w_id)
+                return dict(row) if row else None
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("""
+                SELECT w.*, u.telegram_id, u.full_name, u.phone, u.car_model, u.car_number, u.position, u.yandex_driver_id, u.language, u.balance as user_balance
+                FROM withdrawals w
+                JOIN users u ON w.user_id = u.id
+                WHERE w.id = ?
+            """, (w_id,)).fetchone()
+            conn.close()
+            return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"db_get_withdrawal xatosi: {e}")
+        return None
+
+
+async def db_update_withdrawal_status(w_id: int, status: str):
+    now = utc_now_iso()
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE withdrawals SET status = $1, updated_at = $2 WHERE id = $3", status, now, w_id)
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE withdrawals SET status = ?, updated_at = ? WHERE id = ?", (status, now, w_id))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        logger.error(f"db_update_withdrawal_status xatosi: {e}")
 
 
 async def db_get_all_registered_drivers() -> List[dict]:
@@ -448,7 +486,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# YANDEX FLEET & BRB API
+# YANDEX FLEET API
 # ============================================================
 
 class YandexFleetAPI:
@@ -457,12 +495,13 @@ class YandexFleetAPI:
         self.client_id = client_id.strip()
         self.park_id = park_id.strip()
         self.base_url = YANDEX_FLEET_URL.rstrip("/")
+        self._cached_drivers: List[dict] = []
+        self._cache_time: float = 0
 
-    @property
-    def headers(self) -> dict:
-        client_header = self.client_id or f"taxi/park/{self.park_id}"
+    def _get_headers(self, use_default_client_id: bool = False) -> dict:
+        cid = f"taxi/park/{self.park_id}" if use_default_client_id or not self.client_id else self.client_id
         return {
-            "X-Client-ID": client_header,
+            "X-Client-ID": cid,
             "X-API-Key": self.api_key,
             "X-Park-ID": self.park_id,
             "Content-Type": "application/json",
@@ -472,47 +511,90 @@ class YandexFleetAPI:
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id)
 
+    async def get_all_drivers(self, limit: int = 1000, force_refresh: bool = False) -> tuple[List[dict], str]:
+        if not self._is_configured():
+            return [], "YANDEX_API_KEY yoki YANDEX_PARK_ID kiritilmagan!"
+
+        import time
+        now_t = time.time()
+        if not force_refresh and self._cached_drivers and (now_t - self._cache_time < 60):
+            return self._cached_drivers, ""
+
+        url = f"{self.base_url}/parks/driver-profiles/list"
+        payload = {"query": {"park": {"id": self.park_id}}, "limit": limit}
+
+        # 1-urinish: mavjud client_id bilan
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=self._get_headers(False), json=payload, timeout=25) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        drivers = data.get("driver_profiles", [])
+                        self._cached_drivers = drivers
+                        self._cache_time = now_t
+                        logger.info(f"Yandex Fleet: {len(drivers)} ta haydovchi yuklandi!")
+                        return drivers, ""
+                    elif resp.status in [400, 401, 403]:
+                        # 2-urinish: taxi/park/{park_id} bilan
+                        async with session.post(url, headers=self._get_headers(True), json=payload, timeout=25) as resp2:
+                            if resp2.status == 200:
+                                data = await resp2.json()
+                                drivers = data.get("driver_profiles", [])
+                                self._cached_drivers = drivers
+                                self._cache_time = now_t
+                                logger.info(f"Yandex Fleet (fallback): {len(drivers)} ta haydovchi yuklandi!")
+                                return drivers, ""
+                            err_text = await resp2.text()
+                            logger.error(f"Yandex Fleet get_all_drivers status {resp2.status}: {err_text}")
+                            return [], f"HTTP {resp2.status}: {err_text[:180]}"
+                    else:
+                        err_text = await resp.text()
+                        logger.error(f"Yandex Fleet get_all_drivers status {resp.status}: {err_text}")
+                        return [], f"HTTP {resp.status}: {err_text[:180]}"
+        except Exception as e:
+            logger.error(f"Yandex get_all_drivers xatosi: {e}")
+            return [], str(e)
+
     async def get_driver_by_phone(self, phone: str) -> Optional[dict]:
         if not self._is_configured():
             return None
 
-        clean_digits = re.sub(r"\D", "", phone)
-        short_phone = clean_digits[3:] if clean_digits.startswith("998") and len(clean_digits) == 12 else clean_digits
-        full_phone_plus = f"+{clean_digits}" if not phone.startswith("+") else phone
+        clean_digits = re.sub(r"\D", "", str(phone or ""))
+        if len(clean_digits) < 7:
+            return None
+        core_phone = clean_digits[-9:]
 
-        url = f"{self.base_url}/parks/driver-profiles/list"
-        payload = {
-            "query": {
-                "park": {"id": self.park_id},
-                "driver": {
-                    "phones": [full_phone_plus, clean_digits, short_phone, f"+{short_phone}"]
-                }
-            },
-            "limit": 10
-        }
+        all_drivers, _ = await self.get_all_drivers()
+        logger.info(f"Yandex haydovchi qidiruv (tel): {core_phone}, bazada {len(all_drivers)} ta")
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=12) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        drivers = data.get("driver_profiles", [])
-                        if drivers:
-                            return self._normalize_driver_data(drivers[0])
-        except Exception as e:
-            logger.error(f"Yandex get_driver_by_phone xatosi: {e}")
+        for drv in all_drivers:
+            prof = drv.get("driver_profile", {})
+            phones = prof.get("phones", [])
+            for p in phones:
+                p_digits = re.sub(r"\D", "", str(p))
+                if len(p_digits) >= 7 and p_digits[-9:] == core_phone:
+                    norm = self._normalize_driver_data(drv)
+                    logger.info(f"Yandex haydovchi topildi: {norm['full_name']} ({norm['phone']})")
+                    return norm
+        return None
 
-        try:
-            all_drivers, _ = await self.get_all_drivers(limit=1000)
-            for drv in all_drivers:
-                prof = drv.get("driver_profile", {})
-                phones = prof.get("phones", [])
-                for p in phones:
-                    p_digits = re.sub(r"\D", "", str(p))
-                    if short_phone and short_phone in p_digits:
-                        return self._normalize_driver_data(drv)
-        except Exception as e:
-            logger.error(f"Yandex search fallback xatosi: {e}")
+    async def get_driver_by_name(self, name: str) -> Optional[dict]:
+        if not self._is_configured() or not name:
+            return None
+        clean_search = name.strip().lower()
+        parts = [p for p in re.split(r"[\s\-_,]+", clean_search) if len(p) >= 3]
+        if not parts:
+            return None
+
+        all_drivers, _ = await self.get_all_drivers()
+        logger.info(f"Yandex haydovchi qidiruv (ism): {parts}, bazada {len(all_drivers)} ta")
+
+        for drv in all_drivers:
+            norm = self._normalize_driver_data(drv)
+            full_n = norm["full_name"].lower()
+            if all(p in full_n for p in parts) or any(len(p) >= 4 and p in full_n for p in parts):
+                logger.info(f"Yandex haydovchi topildi (ism bo'yicha): {norm['full_name']}")
+                return norm
         return None
 
     def _normalize_driver_data(self, raw_driver: dict) -> dict:
@@ -551,25 +633,6 @@ class YandexFleetAPI:
             "raw": raw_driver
         }
 
-    async def get_all_drivers(self, limit: int = 1000) -> tuple[List[dict], str]:
-        if not self._is_configured():
-            return [], "YANDEX_API_KEY yoki YANDEX_PARK_ID kiritilmagan!"
-        url = f"{self.base_url}/parks/driver-profiles/list"
-        payload = {"query": {"park": {"id": self.park_id}}, "limit": limit}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=25) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("driver_profiles", []), ""
-                    else:
-                        err_text = await resp.text()
-                        logger.error(f"Yandex get_all_drivers status {resp.status}: {err_text}")
-                        return [], f"HTTP {resp.status}: {err_text[:180]}"
-        except Exception as e:
-            logger.error(f"Yandex get_all_drivers xatosi: {e}")
-            return [], str(e)
-
     async def get_driver_balance(self, yandex_driver_id: str) -> Optional[float]:
         if not self._is_configured() or not yandex_driver_id:
             return None
@@ -577,7 +640,7 @@ class YandexFleetAPI:
         payload = {"query": {"park": {"id": self.park_id}, "driver": {"id": [yandex_driver_id]}}, "limit": 1}
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=12) as resp:
+                async with session.post(url, headers=self._get_headers(), json=payload, timeout=12) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         drivers = data.get("driver_profiles", [])
@@ -602,55 +665,18 @@ class YandexFleetAPI:
         }
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=12) as resp:
+                async with session.post(url, headers=self._get_headers(), json=payload, timeout=12) as resp:
                     if resp.status in [200, 201]:
                         return True
                     else:
                         payload["category_id"] = "other"
-                        async with session.post(url, headers=self.headers, json=payload, timeout=12) as resp2:
+                        async with session.post(url, headers=self._get_headers(), json=payload, timeout=12) as resp2:
                             return resp2.status in [200, 201]
         except Exception as e:
             logger.error(f"Yandex tranzaksiya xatosi: {e}")
             return False
 
-
-class BRBPaymentAPI:
-    def __init__(self, api_url: str, api_key: str, merchant_id: str):
-        self.api_url = api_url.rstrip("/")
-        self.api_key = api_key.strip()
-        self.merchant_id = merchant_id.strip()
-
-    def _is_configured(self) -> bool:
-        return bool(self.api_key and self.merchant_id)
-
-    async def send_payout(self, card_number: str, amount: float, order_id: int) -> dict:
-        if not self._is_configured():
-            return {"success": False, "message": "Manual rejim"}
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "X-Merchant-ID": self.merchant_id,
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "card_number": card_number.replace(" ", ""),
-            "amount": int(amount),
-            "order_id": f"LCH-WD-{order_id}",
-            "description": f"Lochin Taxi tolovi #{order_id}"
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self.api_url}/payout", headers=headers, json=payload, timeout=15) as resp:
-                    data = await resp.json()
-                    if resp.status == 200 and data.get("status") == "success":
-                        return {"success": True, "tx_id": data.get("tx_id", "")}
-                    else:
-                        return {"success": False, "message": data.get("message", "Xatolik")}
-        except Exception as e:
-            logger.error(f"BRB API xatosi: {e}")
-            return {"success": False, "message": str(e)}
-
 yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
-brb_api = BRBPaymentAPI(BRB_API_URL, BRB_API_KEY, BRB_MERCHANT_ID)
 
 
 # ============================================================
@@ -769,7 +795,7 @@ TEXTS = {
     "uz": {
         "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz! Biz bilan daromadingizni oshiring! 🤝\n\nTizimdan toliq foydalanish uchun royxatdan oting:",
         "register_btn": "📝 Ro'yxatdan o'tish",
-        "reg_name": "👤 <b>Ism va familiyangizni kiriting:</b>\n\n<i>Misol: Alisher Qodirov</i>",
+        "reg_name": "👤 <b>Ism va familiyangizni kiriting:</b>\n\n<i>Misol: Abdullaev Ziyovuddin</i>",
         "reg_phone": "📱 <b>Telefon raqamingizni yuboring:</b>\n\nQuyidagi <b>[📱 Telefon raqamni yuborish]</b> tugmasini bosing yoki raqamingizni yozing (Format: <i>+998901234567</i>):",
         "reg_card": "💳 <b>Plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n<i>Misol: 8600 1234 5678 9012 yoki 9860...</i>",
         "reg_car_model": "🚗 <b>Avtomobilingiz rusumini kiriting:</b>\n\n<i>Misol: Chevrolet Cobalt</i>",
@@ -787,10 +813,10 @@ TEXTS = {
         "cancel": "❌ Bekor qilish",
         "send_phone_btn": "📱 Telefon raqamni yuborish",
         "action_cancelled": "❌ Amaliyot bekor qilindi.",
-        "balance_detail": f"💰 <b>{{bot_name}} da Balans va Daromad:</b>\n\n💵 <b>Naqd tushum:</b> 0 som\n💳 <b>Karta tushum (Yandex):</b> <b>{{balance}} som</b>\n🔒 <b>Muzlatilgan:</b> {{blocked}} som\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Kartaga yechish mumkin:</b> <b>{{avail}} som</b>\n\n🚕 Yandex Pro holati: <b>{{y_status}}</b>",
-        "withdraw_min_err": "❌ Minimal yechish summasi: {min_w} som",
-        "withdraw_no_money": "❌ Balansingizda yechish uchun yetarli mablag mavjud emas!",
-        "withdraw_ask": f"💸 <b>Pul yechish (24/7 Avtomat):</b>\n\n🔹 Yechish mumkin: <b>{{avail}} som</b>\n🔹 Minimal summa: <b>{{min_w}} som</b>\n🔹 Komissiya: <b>{{comm}}%</b>\n\nYechmoqchi bolgan summani kiriting (Masalan: <i>50000</i>):",
+        "balance_detail": f"💰 <b>{{bot_name}} da Balans va Daromad:</b>\n\n💵 <b>Naqd tushum:</b> 0 som\n💳 <b>Karta tushum (Yandex):</b> <b>{{balance}} som</b>\n🔒 <b>Depozit (Muzlatilgan):</b> <b>{{blocked}} som</b>\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Kartaga yechish mumkin:</b> <b>{{avail}} som</b>\n\n🚕 Yandex Pro holati: <b>{{y_status}}</b>",
+        "withdraw_min_err": f"❌ Minimal yechish summasi: {MIN_WITHDRAWAL:,} som (Balansda 20 000 som depozit qolishi shart)",
+        "withdraw_no_money": f"❌ Balansingizda yechish uchun yetarli mablag mavjud emas!\n(Hisobingizda minimal 20 000 som depozit saqlanadi)",
+        "withdraw_ask": f"💸 <b>Pul yechish (24/7):</b>\n\n🔹 Yechish mumkin: <b>{{avail}} som</b>\n🔹 Depozitda qoladi: <b>{MIN_DEPOSIT_BALANCE:,} som</b>\n🔹 Komissiya: <b>{{comm}}%</b>\n\nYechmoqchi bolgan summani kiriting (Masalan: <i>50000</i>):",
         "withdraw_confirm": "💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n💰 Yechilayotgan summa: <b>{amount} som</b>\n📊 Komissiya ({comm}%): <b>{comm_amount} som</b>\n💵 Kartaga tushadi: <b>{net_amount} som</b>\n💳 Karta: <code>{card}</code>",
         "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n📞 <b>Menejer telefoni:</b> {SUPPORT_PHONE_DISPLAY}\n\nKerakli bolimni tanlang:",
         "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yolda qoldim)",
@@ -804,7 +830,7 @@ TEXTS = {
     "ru": {
         "welcome": f"🕌 <b>Ассаламу алейкум!</b>\n\n🚕 Добро пожаловать в таксопарк <b>{BOT_NAME}</b>! Увеличьте свой доход вместе с нами! 🤝\n\nДля начала работы пройдите регистрацию:",
         "register_btn": "📝 Регистрация",
-        "reg_name": "👤 <b>Введите ваше имя и фамилию:</b>\n\n<i>Пример: Алишер Кадыров</i>",
+        "reg_name": "👤 <b>Введите ваше имя и фамилию:</b>\n\n<i>Пример: Абдуллаев Зиёвуддин</i>",
         "reg_phone": "📱 <b>Отправьте ваш номер телефона:</b>\n\nНажмите кнопку <b>[📱 Отправить номер]</b> ниже или введите вручную (Формат: <i>+998901234567</i>):",
         "reg_card": "💳 <b>Введите 16-значный номер карты:</b>\n\n<i>Пример: 8600 1234 5678 9012</i>",
         "reg_car_model": "🚗 <b>Введите марку автомобиля:</b>\n\n<i>Пример: Chevrolet Cobalt</i>",
@@ -822,10 +848,10 @@ TEXTS = {
         "cancel": "❌ Отмена",
         "send_phone_btn": "📱 Отправить номер телефона",
         "action_cancelled": "❌ Действие отменено.",
-        "balance_detail": f"💰 <b>Баланс и Доход в {{bot_name}}:</b>\n\n💵 <b>Наличные:</b> 0 сум\n💳 <b>Безналичные (Яндекс):</b> <b>{{balance}} сум</b>\n🔒 <b>Заблокировано:</b> {{blocked}} сум\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Доступно к выводу:</b> <b>{{avail}} сум</b>\n\n🚕 Статус Яндекс Про: <b>{{y_status}}</b>",
-        "withdraw_min_err": "❌ Минимальная сумма вывода: {min_w} сум",
-        "withdraw_no_money": "❌ Недостаточно средств для вывода!",
-        "withdraw_ask": f"💸 <b>Вывод средств (24/7 Авто):</b>\n\n🔹 Доступно: <b>{{avail}} сум</b>\n🔹 Мин. сумма: <b>{{min_w}} сум</b>\n🔹 Комиссия: <b>{{comm}}%</b>\n\nВведите сумму для вывода (Пример: <i>50000</i>):",
+        "balance_detail": f"💰 <b>Баланс и Доход в {{bot_name}}:</b>\n\n💵 <b>Наличные:</b> 0 сум\n💳 <b>Безналичные (Яндекс):</b> <b>{{balance}} сум</b>\n🔒 <b>Депозит (Неснижаемый):</b> <b>{{blocked}} сум</b>\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Доступно к выводу:</b> <b>{{avail}} сум</b>\n\n🚕 Статус Яндекс Про: <b>{{y_status}}</b>",
+        "withdraw_min_err": f"❌ Минимальная сумма вывода: {MIN_WITHDRAWAL:,} сум (Неснижаемый депозит 20 000 сум)",
+        "withdraw_no_money": f"❌ Недостаточно средств для вывода!\n(Неснижаемый остаток депозита: 20 000 сум)",
+        "withdraw_ask": f"💸 <b>Вывод средств (24/7):</b>\n\n🔹 Доступно: <b>{{avail}} сум</b>\n🔹 Неснижаемый депозит: <b>{MIN_DEPOSIT_BALANCE:,} сум</b>\n🔹 Комиссия: <b>{{comm}}%</b>\n\nВведите сумму для вывода (Пример: <i>50000</i>):",
         "withdraw_confirm": "💳 <b>Подтверждаете вывод средств?</b>\n\n💰 Сумма: <b>{amount} сум</b>\n📊 Комиссия ({comm}%): <b>{comm_amount} сум</b>\n💵 К зачислению: <b>{net_amount} сум</b>\n💳 Карта: <code>{card}</code>",
         "sos_title": f"🆘 <b>Центр Экстренной Помощи</b>\n\n📞 <b>Телефон менеджера:</b> {SUPPORT_PHONE_DISPLAY}\n\nВыберите нужный раздел:",
         "sos_btn_loc": "📍 Отправить локацию (ДТП / В пути)",
@@ -1086,6 +1112,7 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
             car_model = y_driver.get("car_model") or "Chevrolet Cobalt"
             car_number = y_driver.get("car_number") or "Nomalum"
             y_id = y_driver.get("id")
+            y_bal = fmt_sum(y_driver.get("balance", 0))
 
             await state.update_data(
                 full_name=full_name,
@@ -1096,14 +1123,16 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
 
             found_msg = (
                 f"✅ <b>Siz Yandex Pro taksoparkimizda topildingiz!</b>\n\n"
-                f"👤 Haydovchi: <b>{full_name}</b>\n"
-                f"🚗 Avtomobil: <b>{car_model} ({car_number})</b>\n\n"
-                f"{t(lang, 'reg_card')}"
+                f"👤 F.I.O: <b>{full_name}</b>\n"
+                f"🚗 Avtomobil: <b>{car_model} ({car_number})</b>\n"
+                f"💰 Yandex Balans: <b>{y_bal} som</b>\n\n"
+                f"💳 Daromadingizni yechib olish uchun <b>plastik karta raqamingizni kiriting</b> (16 ta raqam):"
             ) if lang == "uz" else (
                 f"✅ <b>Вы найдены в базе Яндекс Про таксопарка!</b>\n\n"
-                f"👤 Водитель: <b>{full_name}</b>\n"
-                f"🚗 Автомобиль: <b>{car_model} ({car_number})</b>\n\n"
-                f"{t(lang, 'reg_card')}"
+                f"👤 Ф.И.О: <b>{full_name}</b>\n"
+                f"🚗 Автомобиль: <b>{car_model} ({car_number})</b>\n"
+                f"💰 Баланс Яндекс: <b>{y_bal} сум</b>\n\n"
+                f"💳 Для вывода дохода введите <b>номер вашей карты</b> (16 цифр):"
             )
             await message.answer(found_msg, reply_markup=cancel_kb(lang))
             await state.set_state(RegStates.card)
@@ -1125,8 +1154,45 @@ async def reg_step_name(message: Message, state: FSMContext) -> None:
             return
 
         await state.update_data(full_name=name)
-        await state.set_state(RegStates.card)
-        await message.answer(t(lang, "reg_card"), reply_markup=cancel_kb(lang))
+        search_msg = await message.answer("⏳ <i>Yandex bazasidan ism tekshirilmoqda...</i>")
+        y_driver = await yandex_api.get_driver_by_name(name)
+        try:
+            await search_msg.delete()
+        except Exception:
+            pass
+
+        if y_driver:
+            full_name = y_driver.get("full_name") or name
+            car_model = y_driver.get("car_model") or "Chevrolet Cobalt"
+            car_number = y_driver.get("car_number") or "Nomalum"
+            y_id = y_driver.get("id")
+            y_bal = fmt_sum(y_driver.get("balance", 0))
+
+            await state.update_data(
+                full_name=full_name,
+                car_model=car_model,
+                car_number=car_number,
+                yandex_driver_id=y_id
+            )
+
+            found_msg = (
+                f"✅ <b>Siz Yandex Pro taksoparkimizda topildingiz!</b>\n\n"
+                f"👤 F.I.O: <b>{full_name}</b>\n"
+                f"🚗 Avtomobil: <b>{car_model} ({car_number})</b>\n"
+                f"💰 Yandex Balans: <b>{y_bal} som</b>\n\n"
+                f"💳 Daromadingizni yechib olish uchun <b>plastik karta raqamingizni kiriting</b> (16 ta raqam):"
+            ) if lang == "uz" else (
+                f"✅ <b>Вы найдены в базе Яндекс Про таксопарка!</b>\n\n"
+                f"👤 Ф.И.О: <b>{full_name}</b>\n"
+                f"🚗 Автомобиль: <b>{car_model} ({car_number})</b>\n"
+                f"💰 Баланс Яндекс: <b>{y_bal} сум</b>\n\n"
+                f"💳 Для вывода дохода введите <b>номер вашей карты</b> (16 цифр):"
+            )
+            await message.answer(found_msg, reply_markup=cancel_kb(lang))
+            await state.set_state(RegStates.card)
+        else:
+            await state.set_state(RegStates.card)
+            await message.answer(t(lang, "reg_card"), reply_markup=cancel_kb(lang))
     except Exception as e:
         logger.error(f"reg_step_name xatosi: {e}")
 
@@ -1186,7 +1252,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     car_model = data.get("car_model") or "Chevrolet"
     car_number = data.get("car_number") or ""
     y_id = data.get("yandex_driver_id")
-    yandex_status_text = "Ulangan" if y_id else "Ulanmagan"
+    yandex_status_text = "Ulangan ✅" if y_id else "Ulanmagan ❌"
 
     position = await db_finish_registration(
         telegram_id=uid,
@@ -1229,7 +1295,7 @@ async def balance_handler(message: Message) -> None:
 
         lang = user.get("language", "uz")
         cur_bal = float(user.get("balance", 0.0) or 0.0)
-        y_status = "Ulangan" if user.get("yandex_driver_id") else "Ulanmagan"
+        y_status = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
 
         if user.get("yandex_driver_id"):
             live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
@@ -1237,12 +1303,13 @@ async def balance_handler(message: Message) -> None:
                 cur_bal = live_bal
                 await db_update_balance(uid, live_bal)
 
-        avail = max(0.0, cur_bal - float(user.get("blocked_balance", 0.0) or 0.0))
+        # 20 000 so'm depozit ushlab qolinadi
+        avail = max(0.0, cur_bal - MIN_DEPOSIT_BALANCE)
         await message.answer(
             t(lang, "balance_detail",
               bot_name=BOT_NAME,
               balance=fmt_sum(cur_bal),
-              blocked=fmt_sum(user.get("blocked_balance", 0)),
+              blocked=fmt_sum(MIN_DEPOSIT_BALANCE),
               avail=fmt_sum(avail),
               y_status=y_status),
             reply_markup=user_main_kb(lang, uid)
@@ -1256,13 +1323,13 @@ async def orders_handler(message: Message) -> None:
     try:
         lang = await get_lang(message.from_user.id)
         text = (
-            "📊 <b>Bugungi buyurtmalar:</b>\n\n"
-            "Barcha safarlaringiz va daromadlaringiz <b>Yandex Pro</b> ilovasida real vaqt rejimida hisoblanadi "
-            "va avtomatik tarzda ushbu bot balansingizda aks etadi."
+            "📊 <b>Bugungi buyurtmalar va daromad:</b>\n\n"
+            "🚕 Barcha naqd va karta orqali bajargan safarlaringiz <b>Yandex Pro</b> ilovasida hisoblanadi.\n"
+            "💳 Kartadan to'langan daromadlar va komissiyalar to'g'ridan-to'g'ri bot balansingizda aks etadi va ularni 20 000 so'm depozit qoldig'i saqlangan holda istalgan payt kartangizga yechib olishingiz mumkin."
         ) if lang == "uz" else (
-            "📊 <b>Сегодняшние заказы:</b>\n\n"
-            "Все ваши поездки и доходы рассчитываются в приложении <b>Яндекс Про</b> в режиме реального времени "
-            "и автоматически отображаются на балансе в боте."
+            "📊 <b>Сегодняшние заказы и доход:</b>\n\n"
+            "🚕 Все поездки за наличные и безналичные рассчитываются в приложении <b>Яндекс Про</b>.\n"
+            "💳 Безналичный доход отображается на балансе бота, и вы можете вывести его на свою карту в любое время (с сохранением 20 000 сум депозита)."
         )
         await message.answer(text, reply_markup=user_main_kb(lang, message.from_user.id))
     except Exception as e:
@@ -1324,7 +1391,7 @@ async def profile_handler(message: Message) -> None:
         car_m_val = user.get("car_model") or ""
         car_n_val = user.get("car_number") or ""
         card_val = user.get("card_number") or ""
-        y_val = "Ulangan" if user.get("yandex_driver_id") else "Ulanmagan"
+        y_val = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
 
         if lang == "uz":
             text = (
@@ -1379,7 +1446,7 @@ async def group_handler(message: Message) -> None:
         logger.error(f"group_handler xatosi: {e}")
 
 
-# --- PUL YECHISH ---
+# --- PUL YECHISH (20 000 SO'M DEPOZIT BILAN) ---
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
 async def withdraw_start(message: Message, state: FSMContext) -> None:
@@ -1392,23 +1459,32 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
             return
 
         lang = user.get("language", "uz")
+        cur_bal = float(user.get("balance", 0.0) or 0.0)
+
         if user.get("yandex_driver_id"):
             live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
             if live_bal is not None:
                 await db_update_balance(uid, live_bal)
+                cur_bal = live_bal
                 user["balance"] = live_bal
 
-        cur_bal = float(user.get("balance", 0.0) or 0.0)
-        blocked = float(user.get("blocked_balance", 0.0) or 0.0)
-        avail = max(0.0, cur_bal - blocked)
+        avail = max(0.0, cur_bal - MIN_DEPOSIT_BALANCE)
 
         if avail < MIN_WITHDRAWAL:
-            await message.answer(
-                f"{t(lang, 'withdraw_no_money')}\n\n"
+            msg = (
+                f"❌ <b>Balansingizda yechish uchun yetarli mablag' mavjud emas!</b>\n\n"
+                f"💰 Umumiy balans: <b>{fmt_sum(cur_bal)} som</b>\n"
+                f"🔒 Depozit (ushlab qolinadi): <b>{fmt_sum(MIN_DEPOSIT_BALANCE)} som</b>\n"
                 f"🔹 Yechish mumkin: <b>{fmt_sum(avail)} som</b>\n"
-                f"🔹 Minimal: <b>{fmt_sum(MIN_WITHDRAWAL)} som</b>",
-                reply_markup=user_main_kb(lang, uid)
+                f"🔹 Minimal yechish: <b>{fmt_sum(MIN_WITHDRAWAL)} som</b>"
+            ) if lang == "uz" else (
+                f"❌ <b>Недостаточно средств для вывода!</b>\n\n"
+                f"💰 Общий баланс: <b>{fmt_sum(cur_bal)} сум</b>\n"
+                f"🔒 Депозит (неснижаемый): <b>{fmt_sum(MIN_DEPOSIT_BALANCE)} сум</b>\n"
+                f"🔹 Доступно к выводу: <b>{fmt_sum(avail)} сум</b>\n"
+                f"🔹 Мин. сумма: <b>{fmt_sum(MIN_WITHDRAWAL)} сум</b>"
             )
+            await message.answer(msg, reply_markup=user_main_kb(lang, uid))
             return
 
         await state.set_state(WithdrawStates.amount)
@@ -1437,15 +1513,17 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         amount = float(raw)
         user = await db_get_user(uid)
         cur_bal = float(user.get("balance", 0.0) or 0.0)
-        blocked = float(user.get("blocked_balance", 0.0) or 0.0)
-        avail = max(0.0, cur_bal - blocked)
+        avail = max(0.0, cur_bal - MIN_DEPOSIT_BALANCE)
 
         if amount < MIN_WITHDRAWAL:
             await message.answer(t(lang, "withdraw_min_err", min_w=fmt_sum(MIN_WITHDRAWAL)))
             return
 
         if amount > avail:
-            await message.answer(f"❌ Mablag yetarli emas! Siz kopi bilan <b>{fmt_sum(avail)} som</b> yecha olasiz.")
+            await message.answer(
+                f"❌ Mablag yetarli emas!\n\n"
+                f"Depozitdan (20 000 som) tashqari siz eng kopi bilan <b>{fmt_sum(avail)} som</b> yecha olasiz."
+            )
             return
 
         comm = amount * (COMMISSION_PERCENT / 100.0)
@@ -1455,7 +1533,7 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         await state.update_data(amount=amount, commission=comm, net_amount=net, card=card_val)
         await state.set_state(WithdrawStates.confirm)
 
-        btn_text = "⚡️ Avtomat Yechish (24/7)" if lang == "uz" else "⚡️ Авто Вывод (24/7)"
+        btn_text = "⚡️ Pul yechishni tasdiqlash" if lang == "uz" else "⚡️ Подтвердить вывод"
         btn_cancel = "❌ Bekor qilish" if lang == "uz" else "❌ Отмена"
 
         kb = InlineKeyboardMarkup(
@@ -1501,12 +1579,8 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         await state.clear()
 
         user = await db_get_user(uid)
-
-        if user.get("yandex_driver_id"):
-            await yandex_api.create_transaction(user["yandex_driver_id"], amount, f"Lochin Taxi Bot Yechish {card}")
-
-        brb_res = await brb_api.send_payout(card, net_amount, user["id"])
-        status = "completed" if brb_res.get("success") else "manual_pending"
+        cur_bal = float(user.get("balance", 0.0) or 0.0)
+        remaining = cur_bal - amount
 
         w_id = await db_create_withdrawal(
             user_id=user["id"],
@@ -1514,25 +1588,26 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
             commission=commission,
             net_amount=net_amount,
             card_number=card,
-            status=status,
-            payout_method="brb_auto" if brb_res.get("success") else "manual",
-            ext_tx_id=brb_res.get("tx_id", "")
+            status="pending",
+            payout_method="manual",
+            ext_tx_id=""
         )
 
-        if brb_res.get("success"):
-            msg = (
-                f"✅ <b>Mablag kartangizga muvaffaqiyatli otkazildi!</b>\n\n"
-                f"💰 Yechilgan: <b>{fmt_sum(amount)} som</b>\n"
-                f"💵 Kartaga tushdi: <b>{fmt_sum(net_amount)} som</b>\n"
-                f"💳 Karta: <code>{card}</code>"
-            )
-        else:
-            msg = (
-                f"✅ <b>Pul yechish arizangiz qabul qilindi!</b>\n\n"
-                f"💰 Summa: <b>{fmt_sum(net_amount)} som</b>\n"
-                f"💳 Karta: <code>{card}</code>\n\n"
-                f"<i>Mablag tez orada kartangizga otkaziladi.</i>"
-            )
+        msg = (
+            f"✅ <b>Pul yechish arizangiz ma'muriyatga yuborildi!</b>\n\n"
+            f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} som</b>\n"
+            f"💵 Kartaga tushadi: <b>{fmt_sum(net_amount)} som</b>\n"
+            f"💳 Karta: <code>{card}</code>\n"
+            f"🔒 Depozitda qoladigan: <b>{fmt_sum(remaining)} som</b>\n\n"
+            f"<i>Mablag' tez orada kartangizga o'tkazib beriladi.</i>"
+        ) if lang == "uz" else (
+            f"✅ <b>Заявка на вывод средств отправлена администрации!</b>\n\n"
+            f"💰 Сумма вывода: <b>{fmt_sum(amount)} сум</b>\n"
+            f"💵 К зачислению: <b>{fmt_sum(net_amount)} сум</b>\n"
+            f"💳 Карта: <code>{card}</code>\n"
+            f"🔒 Остаток депозита: <b>{fmt_sum(remaining)} сум</b>\n\n"
+            f"<i>Средства скоро поступят на вашу карту.</i>"
+        )
 
         await callback.message.edit_text(msg)
         await callback.answer()
@@ -1540,22 +1615,127 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         drv_name = user.get("full_name") or "Haydovchi"
         drv_pos = user.get("position") or "N/A"
         drv_phone = user.get("phone") or ""
+        drv_car_m = user.get("car_model") or ""
+        drv_car_n = user.get("car_number") or ""
+        drv_yandex = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
+
+        # Admin uchun qulay boshqaruv tugmalari
+        adm_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ To'landi (Yandexdan yechish)", callback_data=f"adm_wd:pay:{w_id}"),
+                    InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_wd:rej:{w_id}")
+                ],
+                [
+                    InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")
+                ]
+            ]
+        )
+
+        admin_alert = (
+            f"💸 <b>YANGI PUL YECHISH ARIZASI!</b> (Ariza #{w_id})\n\n"
+            f"🆔 <b>POSITION:</b> <code>{drv_pos}</code>\n"
+            f"👤 <b>Haydovchi:</b> <b>{drv_name}</b>\n"
+            f"📱 <b>Telefon:</b> <code>{drv_phone}</code>\n"
+            f"🚗 <b>Avtomobil:</b> <b>{drv_car_m} ({drv_car_n})</b>\n"
+            f"💳 <b>Karta:</b> <code>{card}</code> (Nusxa olish uchun bosing)\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"💰 <b>Yechilayotgan summa:</b> <b>{fmt_sum(amount)} som</b>\n"
+            f"📊 <b>Komissiya ({COMMISSION_PERCENT}%):</b> <b>{fmt_sum(commission)} som</b>\n"
+            f"💵 <b>Kartaga to'lanadigan sof summa:</b> <b>{fmt_sum(net_amount)} som</b>\n"
+            f"🔒 <b>Depozitda qoladigan:</b> <b>{fmt_sum(remaining)} som</b> (Min. depozit: 20 000 som)\n"
+            f"🚕 <b>Yandex Pro:</b> {drv_yandex}"
+        )
 
         for adm in ADMIN_IDS:
             try:
-                await bot.send_message(
-                    adm,
-                    f"💸 <b>Yangi pul yechish:</b>\n\n"
-                    f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
-                    f"📱 Telefon: <code>{drv_phone}</code>\n"
-                    f"💰 Summa: <b>{fmt_sum(amount)} som</b>\n"
-                    f"💳 Karta: <code>{card}</code>\n"
-                    f"📊 Holat: <b>{status}</b>"
-                )
+                await bot.send_message(adm, admin_alert, reply_markup=adm_kb)
             except Exception as e:
-                logger.error(f"Admin {adm} ga pul yechish xabarini yuborishda xato: {e}")
+                logger.error(f"Admin {adm} ga pul yechish arizasini yuborishda xato: {e}")
     except Exception as e:
         logger.error(f"withdraw_process_callback xatosi: {e}")
+
+
+# --- ADMIN PUL YECHISH TASDIQLASH / RAD ETISH ---
+
+@admin_router.callback_query(F.data.startswith("adm_wd:"))
+async def admin_handle_withdrawal_decision(callback: CallbackQuery) -> None:
+    try:
+        _, action, w_id_str = callback.data.split(":")
+        w_id = int(w_id_str)
+        w_data = await db_get_withdrawal(w_id)
+
+        if not w_data:
+            await callback.answer("❌ Ariza topilmadi!", show_alert=True)
+            return
+
+        if w_data.get("status") in ["completed", "rejected"]:
+            await callback.answer(f"Ushbu ariza allaqachon '{w_data.get('status')}' holatida!", show_alert=True)
+            return
+
+        drv_tg_id = w_data["telegram_id"]
+        drv_name = w_data["full_name"]
+        amount = float(w_data["amount"])
+        net_amount = float(w_data["net_amount"])
+        card = w_data["card_number"]
+        y_id = w_data.get("yandex_driver_id")
+        drv_lang = w_data.get("language", "uz")
+
+        if action == "pay":
+            y_done = False
+            if y_id:
+                y_done = await yandex_api.create_transaction(y_id, amount, f"Lochin Taxi tolov #{w_id}")
+
+            await db_update_withdrawal_status(w_id, "completed")
+            y_note = " (Yandex hisobidan ham yechildi ✅)" if y_done else ""
+
+            await callback.message.edit_text(
+                f"{callback.message.text}\n\n➖➖➖➖➖➖➖➖➖➖\n"
+                f"✅ <b>TO'LANDI:</b> Admin tomonidan kartaga to'lab berildi va yakunlandi!{y_note}"
+            )
+            await callback.answer("✅ To'lov tasdiqlandi!")
+
+            # Haydovchiga xushxabar
+            try:
+                msg_for_drv = (
+                    f"✅ <b>Mablag' kartangizga o'tkazib berildi!</b>\n\n"
+                    f"💰 Yechilgan: <b>{fmt_sum(amount)} som</b>\n"
+                    f"💵 Kartangizga tushdi: <b>{fmt_sum(net_amount)} som</b>\n"
+                    f"💳 Karta: <code>{card}</code>\n\n"
+                    f"<i>{BOT_NAME} bilan ishlaganingiz uchun rahmat! 🤝</i>"
+                ) if drv_lang == "uz" else (
+                    f"✅ <b>Средства переведены на вашу карту!</b>\n\n"
+                    f"💰 Сумма: <b>{fmt_sum(amount)} сум</b>\n"
+                    f"💵 Зачислено: <b>{fmt_sum(net_amount)} сум</b>\n"
+                    f"💳 Карта: <code>{card}</code>\n\n"
+                    f"<i>Спасибо за сотрудничество с {BOT_NAME}! 🤝</i>"
+                )
+                await bot.send_message(drv_tg_id, msg_for_drv)
+            except Exception:
+                pass
+
+        elif action == "rej":
+            await db_update_withdrawal_status(w_id, "rejected")
+            await callback.message.edit_text(
+                f"{callback.message.text}\n\n➖➖➖➖➖➖➖➖➖➖\n"
+                f"❌ <b>RAD ETILDI:</b> Ariza ma'muriyat tomonidan bekor qilindi."
+            )
+            await callback.answer("❌ Ariza rad etildi!")
+
+            # Haydovchiga xabar
+            try:
+                msg_for_drv = (
+                    f"❌ <b>Pul yechish arizangiz ma'muriyat tomonidan rad etildi.</b>\n\n"
+                    f"Savollar bo'lsa, dispetcher bilan bog'laning: {SUPPORT_PHONE_DISPLAY}"
+                ) if drv_lang == "uz" else (
+                    f"❌ <b>Ваша заявка на вывод средств отклонена администрацией.</b>\n\n"
+                    f"По вопросам обращайтесь к диспетчеру: {SUPPORT_PHONE_DISPLAY}"
+                )
+                await bot.send_message(drv_tg_id, msg_for_drv)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"admin_handle_withdrawal_decision xatosi: {e}")
 
 
 # --- SOS / YORDAM ---
@@ -1829,7 +2009,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
         return
     status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar yuklanmoqda...</i>")
     try:
-        drivers, err = await yandex_api.get_all_drivers(limit=1000)
+        drivers, err = await yandex_api.get_all_drivers(limit=1000, force_refresh=True)
 
         if not drivers:
             await status_msg.edit_text(
