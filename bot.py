@@ -59,6 +59,8 @@ if env_admins:
             ADMIN_IDS.add(int(adm_clean))
 
 MANAGER_TG_ID = int(os.getenv("MANAGER_TG_ID", "8934129079"))
+ADMIN_IDS.add(MANAGER_TG_ID)
+
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
@@ -75,7 +77,6 @@ BRB_MERCHANT_ID = os.getenv("BRB_MERCHANT_ID", "").strip()
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "30000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "2.0"))
-REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "30000"))
 
 
 def fmt_sum(val: Any) -> str:
@@ -459,8 +460,9 @@ class YandexFleetAPI:
 
     @property
     def headers(self) -> dict:
+        client_header = self.client_id or f"taxi/park/{self.park_id}"
         return {
-            "X-Client-ID": self.client_id,
+            "X-Client-ID": client_header,
             "X-API-Key": self.api_key,
             "X-Park-ID": self.park_id,
             "Content-Type": "application/json",
@@ -468,7 +470,7 @@ class YandexFleetAPI:
         }
 
     def _is_configured(self) -> bool:
-        return bool(self.api_key and self.park_id and self.client_id)
+        return bool(self.api_key and self.park_id)
 
     async def get_driver_by_phone(self, phone: str) -> Optional[dict]:
         if not self._is_configured():
@@ -501,7 +503,7 @@ class YandexFleetAPI:
             logger.error(f"Yandex get_driver_by_phone xatosi: {e}")
 
         try:
-            all_drivers = await self.get_all_drivers(limit=1000)
+            all_drivers, _ = await self.get_all_drivers(limit=1000)
             for drv in all_drivers:
                 prof = drv.get("driver_profile", {})
                 phones = prof.get("phones", [])
@@ -549,9 +551,9 @@ class YandexFleetAPI:
             "raw": raw_driver
         }
 
-    async def get_all_drivers(self, limit: int = 1000) -> List[dict]:
+    async def get_all_drivers(self, limit: int = 1000) -> tuple[List[dict], str]:
         if not self._is_configured():
-            return []
+            return [], "YANDEX_API_KEY yoki YANDEX_PARK_ID kiritilmagan!"
         url = f"{self.base_url}/parks/driver-profiles/list"
         payload = {"query": {"park": {"id": self.park_id}}, "limit": limit}
         try:
@@ -559,10 +561,14 @@ class YandexFleetAPI:
                 async with session.post(url, headers=self.headers, json=payload, timeout=25) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        return data.get("driver_profiles", [])
+                        return data.get("driver_profiles", []), ""
+                    else:
+                        err_text = await resp.text()
+                        logger.error(f"Yandex get_all_drivers status {resp.status}: {err_text}")
+                        return [], f"HTTP {resp.status}: {err_text[:180]}"
         except Exception as e:
             logger.error(f"Yandex get_all_drivers xatosi: {e}")
-        return []
+            return [], str(e)
 
     async def get_driver_balance(self, yandex_driver_id: str) -> Optional[float]:
         if not self._is_configured() or not yandex_driver_id:
@@ -586,17 +592,23 @@ class YandexFleetAPI:
         if not self._is_configured() or not yandex_driver_id:
             return False
         url = f"{self.base_url}/parks/driver-profiles/transactions"
+        category = os.getenv("YANDEX_TX_CATEGORY", "didox out").strip() or "didox out"
         payload = {
             "park_id": self.park_id,
             "driver_profile_id": yandex_driver_id,
             "amount": str(-abs(amount)),
-            "category_id": "other",
+            "category_id": category,
             "description": description
         }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=self.headers, json=payload, timeout=12) as resp:
-                    return resp.status in [200, 201]
+                    if resp.status in [200, 201]:
+                        return True
+                    else:
+                        payload["category_id"] = "other"
+                        async with session.post(url, headers=self.headers, json=payload, timeout=12) as resp2:
+                            return resp2.status in [200, 201]
         except Exception as e:
             logger.error(f"Yandex tranzaksiya xatosi: {e}")
             return False
@@ -768,7 +780,6 @@ TEXTS = {
         "menu_orders": "📊 Bugungi buyurtmalar",
         "menu_withdraw": "💸 Pul yechish (24/7)",
         "menu_profile": "👤 Profil",
-        "menu_referral": "👥 Do'stni taklif qilish (Bonus)",
         "menu_top": "🏆 TOP Haydovchilar",
         "menu_group": "📢 Yangiliklar / Guruh",
         "menu_sos": "🆘 Yordam / SOS",
@@ -781,7 +792,6 @@ TEXTS = {
         "withdraw_no_money": "❌ Balansingizda yechish uchun yetarli mablag mavjud emas!",
         "withdraw_ask": f"💸 <b>Pul yechish (24/7 Avtomat):</b>\n\n🔹 Yechish mumkin: <b>{{avail}} som</b>\n🔹 Minimal summa: <b>{{min_w}} som</b>\n🔹 Komissiya: <b>{{comm}}%</b>\n\nYechmoqchi bolgan summani kiriting (Masalan: <i>50000</i>):",
         "withdraw_confirm": "💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n💰 Yechilayotgan summa: <b>{amount} som</b>\n📊 Komissiya ({comm}%): <b>{comm_amount} som</b>\n💵 Kartaga tushadi: <b>{net_amount} som</b>\n💳 Karta: <code>{card}</code>",
-        "ref_text": f"👥 <b>Dostlarni taklif qiling va daromad oling!</b>\n\nHar bir taklif qilgan faol haydovchingiz uchun: <b>{REFERRAL_BONUS:,} som</b> bonus olasiz!\n\n🔗 Sizning taklif havolangiz:\n<code>{{link}}</code>",
         "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n📞 <b>Menejer telefoni:</b> {SUPPORT_PHONE_DISPLAY}\n\nKerakli bolimni tanlang:",
         "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yolda qoldim)",
         "sos_btn_msg": "✍️ Menejerga xabar / Shikoyat yozish",
@@ -805,7 +815,6 @@ TEXTS = {
         "menu_orders": "📊 Сегодняшние заказы",
         "menu_withdraw": "💸 Вывод средств (24/7)",
         "menu_profile": "👤 Профиль",
-        "menu_referral": "👥 Пригласить друга (Бонус)",
         "menu_top": "🏆 ТОП Водителей",
         "menu_group": "📢 Новости / Группа",
         "menu_sos": "🆘 Помощь / SOS",
@@ -818,7 +827,6 @@ TEXTS = {
         "withdraw_no_money": "❌ Недостаточно средств для вывода!",
         "withdraw_ask": f"💸 <b>Вывод средств (24/7 Авто):</b>\n\n🔹 Доступно: <b>{{avail}} сум</b>\n🔹 Мин. сумма: <b>{{min_w}} сум</b>\n🔹 Комиссия: <b>{{comm}}%</b>\n\nВведите сумму для вывода (Пример: <i>50000</i>):",
         "withdraw_confirm": "💳 <b>Подтверждаете вывод средств?</b>\n\n💰 Сумма: <b>{amount} сум</b>\n📊 Комиссия ({comm}%): <b>{comm_amount} сум</b>\n💵 К зачислению: <b>{net_amount} сум</b>\n💳 Карта: <code>{card}</code>",
-        "ref_text": f"👥 <b>Приглашайте друзей и получайте бонусы!</b>\n\nЗа каждого активного водителя: <b>{REFERRAL_BONUS:,} сум</b> бонуса!\n\n🔗 Ваша реферальная ссылка:\n<code>{{link}}</code>",
         "sos_title": f"🆘 <b>Центр Экстренной Помощи</b>\n\n📞 <b>Телефон менеджера:</b> {SUPPORT_PHONE_DISPLAY}\n\nВыберите нужный раздел:",
         "sos_btn_loc": "📍 Отправить локацию (ДТП / В пути)",
         "sos_btn_msg": "✍️ Написать менеджеру / Жалоба",
@@ -838,10 +846,10 @@ def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text=t(lang, "menu_balance")), KeyboardButton(text=t(lang, "menu_withdraw"))],
         [KeyboardButton(text=t(lang, "menu_orders")), KeyboardButton(text=t(lang, "menu_profile"))],
-        [KeyboardButton(text=t(lang, "menu_referral")), KeyboardButton(text=t(lang, "menu_top"))],
-        [KeyboardButton(text=t(lang, "menu_group")), KeyboardButton(text=t(lang, "menu_sos"))],
+        [KeyboardButton(text=t(lang, "menu_top")), KeyboardButton(text=t(lang, "menu_group"))],
+        [KeyboardButton(text=t(lang, "menu_sos"))],
     ]
-    if uid in ADMIN_IDS:
+    if uid in ADMIN_IDS or uid == MANAGER_TG_ID:
         buttons.append([KeyboardButton(text=t(lang, "menu_admin"))])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -894,7 +902,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📊 Statistika" if is_uz else "📊 Статистика"), KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет")],
             [KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация Яндекс"), KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка")],
-            [KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители"), KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные")],
+            [KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители")],
             [KeyboardButton(text="⬅️ Asosiy menyu" if is_uz else "⬅️ Главное меню")],
         ],
         resize_keyboard=True
@@ -1204,8 +1212,8 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
                 f"🆔 POSITION: <code>{position}</code>\n"
                 f"🚕 Yandex: <b>{yandex_status_text}</b>"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Admin {adm} ga yangi haydovchi xabarini yuborishda xato: {e}")
 
 
 # --- BALANS VA BUYURTMALAR ---
@@ -1358,21 +1366,6 @@ async def change_lang_menu_cb(callback: CallbackQuery) -> None:
         await callback.answer()
     except Exception as e:
         logger.error(f"change_lang_menu_cb xatosi: {e}")
-
-
-@router.message(F.text.in_(["👥 Do'stni taklif qilish (Bonus)", "👥 Пригласить друга (Бонус)"]))
-async def referral_handler(message: Message) -> None:
-    try:
-        uid = message.from_user.id
-        user = await db_get_user(uid)
-        if not user:
-            return
-        bot_info = await bot.get_me()
-        ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
-        lang = user.get("language", "uz")
-        await message.answer(t(lang, "ref_text", link=ref_link), reply_markup=user_main_kb(lang, uid))
-    except Exception as e:
-        logger.error(f"referral_handler xatosi: {e}")
 
 
 @router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа"]))
@@ -1559,8 +1552,8 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
                     f"💳 Karta: <code>{card}</code>\n"
                     f"📊 Holat: <b>{status}</b>"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Admin {adm} ga pul yechish xabarini yuborishda xato: {e}")
     except Exception as e:
         logger.error(f"withdraw_process_callback xatosi: {e}")
 
@@ -1640,8 +1633,8 @@ async def sos_receive_location_geo(message: Message, state: FSMContext) -> None:
             try:
                 await bot.send_message(adm, alert, reply_markup=adm_kb)
                 await bot.send_location(adm, latitude=lat, longitude=lon)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Admin {adm} ga SOS lokatsiyasini yuborishda xato: {e}")
 
         await message.answer(t(lang, "sos_sent"), reply_markup=user_main_kb(lang, uid))
     except Exception as e:
@@ -1698,8 +1691,8 @@ async def sos_receive_location_text(message: Message, state: FSMContext) -> None
         for adm in ADMIN_IDS:
             try:
                 await bot.send_message(adm, alert, reply_markup=adm_kb)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Admin {adm} ga SOS matnini yuborishda xato: {e}")
 
         await message.answer(t(lang, "sos_sent"), reply_markup=user_main_kb(lang, uid))
     except Exception as e:
@@ -1771,8 +1764,8 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
         for adm in ADMIN_IDS:
             try:
                 await bot.send_message(adm, alert, reply_markup=adm_kb)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Admin {adm} ga SOS xabarini yuborishda xato: {e}")
 
         await message.answer(t(lang, "sos_sent"), reply_markup=user_main_kb(lang, uid))
     except Exception as e:
@@ -1783,7 +1776,7 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]), StateFilter("*"))
 async def admin_open(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
         return
     await state.clear()
     lang = await get_lang(message.from_user.id)
@@ -1792,7 +1785,7 @@ async def admin_open(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(F.text.in_(["📊 Statistika", "📊 Статистика"]))
 async def admin_stats_handler(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
         return
     stats = await db_get_stats()
     text = (
@@ -1809,7 +1802,7 @@ async def admin_stats_handler(message: Message) -> None:
 
 @admin_router.message(F.text.in_(["📥 Excel Hisobot", "📥 Excel Отчет"]))
 async def admin_export_excel(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
         return
     status_msg = await message.answer("⏳ <i>Excel hisoboti tayyorlanmoqda...</i>")
     try:
@@ -1832,14 +1825,18 @@ async def admin_export_excel(message: Message) -> None:
 
 @admin_router.message(F.text.in_(["🔄 Yandex Sinxronlash", "🔄 Синхронизация Яндекс"]))
 async def admin_sync_all_drivers(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
         return
     status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar yuklanmoqda...</i>")
     try:
-        drivers = await yandex_api.get_all_drivers(limit=1000)
+        drivers, err = await yandex_api.get_all_drivers(limit=1000)
 
         if not drivers:
-            await status_msg.edit_text("❌ Yandex API dan ma'lumot olib bolmadi. API kalitlarini tekshiring.")
+            await status_msg.edit_text(
+                f"❌ <b>Yandex API dan ma'lumot olib bo'lmadi!</b>\n\n"
+                f"📌 <b>Sabab / Xatolik:</b>\n<code>{err}</code>\n\n"
+                f"💡 <i>Render Environment bo'limida YANDEX_API_KEY va YANDEX_PARK_ID to'g'ri kiritilganini tekshiring.</i>"
+            )
             return
 
         count = 0
@@ -1899,7 +1896,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
 
 @admin_router.message(F.text.in_(["📢 Xabar tarqatish", "📢 Рассылка"]))
 async def admin_broadcast_prompt(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
         return
     await state.set_state(AdminBroadcastStates.waiting_for_message)
     await message.answer("📢 <b>Barcha haydovchilarga yubormoqchi bolgan xabaringizni yozing:</b>\n\n<i>Bekor qilish: '❌ Bekor qilish'</i>", reply_markup=cancel_kb("uz"))
@@ -1907,7 +1904,7 @@ async def admin_broadcast_prompt(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(AdminBroadcastStates.waiting_for_message)
 async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
         return
 
     if message.text in ["❌ Bekor qilish", "❌ Отмена"]:
@@ -1936,7 +1933,7 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(F.text.in_(["👥 Haydovchilar", "👥 Водители"]))
 async def admin_list_drivers(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if message.from_user.id not in ADMIN_IDS and message.from_user.id != MANAGER_TG_ID:
         return
     drivers = await db_get_all_registered_drivers()
     if not drivers:
@@ -1958,55 +1955,6 @@ async def admin_list_drivers(message: Message) -> None:
             f"💰 Balans: <b>{drv_bal} som</b>\n---------------------------\n"
         )
     await message.answer(text)
-
-
-@admin_router.message(F.text.in_(["🚫 Nofaollar", "🚫 Неактивные"]))
-async def admin_inactive_drivers(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    ten_days_ago = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
-    try:
-        if db_pool:
-            async with db_pool.acquire() as conn:
-                inactive = await conn.fetch("""
-                    SELECT position, full_name, phone, car_model, car_number, last_activity 
-                    FROM users 
-                    WHERE is_registered = 1 AND (last_activity < $1 OR is_blocked = 1)
-                    ORDER BY id DESC LIMIT 15
-                """, ten_days_ago)
-                inactive = [dict(r) for r in inactive]
-        else:
-            conn = sqlite3.connect(DB_PATH)
-            conn.row_factory = sqlite3.Row
-            inactive = conn.execute("""
-                SELECT position, full_name, phone, car_model, car_number, last_activity 
-                FROM users 
-                WHERE is_registered = 1 AND (last_activity < ? OR is_blocked = 1)
-                ORDER BY id DESC LIMIT 15
-            """, (ten_days_ago,)).fetchall()
-            conn.close()
-            inactive = [dict(r) for r in inactive]
-
-        if not inactive:
-            await message.answer("✅ Barcha haydovchilar faol!")
-            return
-
-        text = f"🚫 <b>10+ kundan beri faol bolmagan haydovchilar ({len(inactive)} ta):</b>\n\n"
-        for drv in inactive:
-            drv_name = drv.get("full_name") or "Haydovchi"
-            drv_phone = drv.get("phone") or ""
-            drv_car_m = drv.get("car_model") or ""
-            drv_car_n = drv.get("car_number") or ""
-            drv_act = str(drv.get("last_activity") or "Nomalum")[:10]
-
-            text += (
-                f"👤 <b>{drv_name}</b> | 📱 Tel: {drv_phone}\n"
-                f"🚗 {drv_car_m} ({drv_car_n})\n"
-                f"📅 Faollik: {drv_act}\n---------------------------\n"
-            )
-        await message.answer(text)
-    except Exception as e:
-        logger.error(f"admin_inactive_drivers xatosi: {e}")
 
 
 @admin_router.message(F.text.in_(["⬅️ Asosiy menyu", "⬅️ Главное меню"]), StateFilter("*"))
@@ -2036,8 +1984,8 @@ async def monthly_report_scheduler():
                             document=file,
                             caption=f"🗓 <b>{now.strftime('%B %Y')} Oylik Hisoboti!</b>\n\nTaksoparkdagi barcha haydovchilar va umumiy tushumlar."
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Admin {adm} ga oylik hisobot yuborishda xato: {e}")
                 await asyncio.sleep(70)
         except Exception as e:
             logger.error(f"Oylik avtomatik hisobot xatosi: {e}")
