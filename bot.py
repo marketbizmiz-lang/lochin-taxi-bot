@@ -468,7 +468,7 @@ class YandexFleetAPI:
         car_model = car.get("model", "").strip()
         brand_and_model = car.get("brand_and_model", "").strip()
         car_title = brand_and_model or f"{car_brand} {car_model}".strip() or "Chevrolet Cobalt"
-        car_number = car.get("number", "").strip() or car.get("normalized_number", "").strip() or "Noma'lum"
+        car_number = car.get("number", "").strip() or car.get("normalized_number", "").strip() or "Nomalum"
 
         balance = 0.0
         if accounts:
@@ -564,7 +564,7 @@ class BRBPaymentAPI:
             "card_number": card_number.replace(" ", ""),
             "amount": int(amount),
             "order_id": f"LCH-WD-{order_id}",
-            "description": f"Lochin Taxi to'lovi #{order_id}"
+            "description": f"Lochin Taxi tolovi #{order_id}"
         }
         try:
             async with aiohttp.ClientSession() as session:
@@ -595,8 +595,8 @@ async def generate_monthly_excel_report() -> bytes:
     headers = [
         "№", "POSITION", "F.I.O (Haydovchi)", "Telefon Raqam",
         "Avtomobil Rusumi", "Davlat Raqami", "Plastik Karta",
-        "Jami Buyurtmalar", "Jami Daromad (so'm)", "Ushlab qolingan Komissiya (so'm)",
-        "Joriy Balans (so'm)", "Yandex Driver ID"
+        "Jami Buyurtmalar", "Jami Daromad (som)", "Ushlab qolingan Komissiya (som)",
+        "Joriy Balans (som)", "Yandex Driver ID"
     ]
 
     header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
@@ -635,11 +635,15 @@ async def generate_monthly_excel_report() -> bytes:
         total_comm_sum += comm
         total_balance_sum += bal
 
+        name_val = drv.get("full_name") or "Nomalum"
+        pos_val = drv.get("position") or "N/A"
+        y_val = drv.get("yandex_driver_id") or "Yoq"
+
         row_data = [
-            idx, drv.get("position", "N/A"), drv.get("full_name", "Noma'lum"),
+            idx, pos_val, name_val,
             drv.get("phone", ""), drv.get("car_model", ""), drv.get("car_number", ""),
             drv.get("card_number", ""), orders, int(earnings), int(comm), int(bal),
-            drv.get("yandex_driver_id", "Yo'q")
+            y_val
         ]
         ws.append(row_data)
 
@@ -692,15 +696,15 @@ async def generate_monthly_excel_report() -> bytes:
 
 TEXTS = {
     "uz": {
-        "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz! Biz bilan daromadingizni oshiring! 🤝\n\nTizimdan to'liq foydalanish uchun ro'yxatdan o'ting:",
+        "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz! Biz bilan daromadingizni oshiring! 🤝\n\nTizimdan toliq foydalanish uchun royxatdan oting:",
         "register_btn": "📝 Ro'yxatdan o'tish",
         "reg_name": "👤 <b>Ism va familiyangizni kiriting:</b>\n\n<i>Misol: Alisher Qodirov</i>",
         "reg_phone": "📱 <b>Telefon raqamingizni yuboring:</b>\n\nQuyidagi <b>[📱 Telefon raqamni yuborish]</b> tugmasini bosing yoki raqamingizni yozing (Format: <i>+998901234567</i>):",
         "reg_card": "💳 <b>Plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n<i>Misol: 8600 1234 5678 9012 yoki 9860...</i>",
         "reg_car_model": "🚗 <b>Avtomobilingiz rusumini kiriting:</b>\n\n<i>Misol: Chevrolet Cobalt</i>",
         "reg_car_number": "🔢 <b>Avtomobil davlat raqamini kiriting:</b>\n\n<i>Misol: 01 A 123 AA</i>",
-        "reg_success": f"✅ <b>Tabriklaymiz! Siz muvaffaqiyatli ro'yxatdan o'tdingiz.</b>\n\n🆔 Sizning POSITION ID: <code>{{position}}</code>\n🔑 Bu kod sizning taksoparkdagi shaxsiy kodingiz.",
-        "already_reg": "✅ <b>Siz tizimda ro'yxatdan o'tgansiz!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Haydovchi: <b>{name}</b>",
+        "reg_success": f"✅ <b>Tabriklaymiz! Siz muvaffaqiyatli royxatdan otdingiz.</b>\n\n🆔 Sizning POSITION ID: <code>{{position}}</code>\n🔑 Bu kod sizning taksoparkdagi shaxsiy kodingiz.",
+        "already_reg": "✅ <b>Siz tizimda royxatdan otgansiz!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Haydovchi: <b>{name}</b>",
         "menu_balance": "💰 Balans",
         "menu_orders": "📊 Bugungi buyurtmalar",
         "menu_withdraw": "💸 Pul yechish (24/7)",
@@ -713,14 +717,14 @@ TEXTS = {
         "cancel": "❌ Bekor qilish",
         "send_phone_btn": "📱 Telefon raqamni yuborish",
         "action_cancelled": "❌ Amaliyot bekor qilindi.",
-        "balance_detail": f"💰 <b>{{bot_name}} da Balans va Daromad:</b>\n\n💵 <b>Naqd tushum:</b> 0 so'm\n💳 <b>Karta tushum (Yandex):</b> <b>{{balance}} so'm</b>\n🔒 <b>Muzlatilgan:</b> {{blocked}} so'm\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Kartaga yechish mumkin:</b> <b>{{avail}} so'm</b>\n\n🚕 Yandex Pro holati: <b>{{y_status}}</b>",
-        "withdraw_min_err": "❌ Minimal yechish summasi: {min_w} so'm",
-        "withdraw_no_money": "❌ Balansingizda yechish uchun yetarli mablag' mavjud emas!",
-        "withdraw_ask": f"💸 <b>Pul yechish (24/7 Avtomat):</b>\n\n🔹 Yechish mumkin: <b>{{avail}} so'm</b>\n🔹 Minimal summa: <b>{{min_w}} so'm</b>\n🔹 Komissiya: <b>{{comm}}%</b>\n\nYechmoqchi bo'lgan summani kiriting (Masalan: <i>50000</i>):",
-        "withdraw_confirm": "💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n💰 Yechilayotgan summa: <b>{amount} so'm</b>\n📊 Komissiya ({comm}%): <b>{comm_amount} so'm</b>\n💵 Kartaga tushadi: <b>{net_amount} so'm</b>\n💳 Karta: <code>{card}</code>",
-        "ref_text": f"👥 <b>Do'stlarni taklif qiling va daromad oling!</b>\n\nHar bir taklif qilgan faol haydovchingiz uchun: <b>{REFERRAL_BONUS:,} so'm</b> bonus olasiz!\n\n🔗 Sizning taklif havolangiz:\n<code>{{link}}</code>",
-        "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n📞 <b>Menejer telefoni:</b> {SUPPORT_PHONE_DISPLAY}\n\nKerakli bo'limni tanlang:",
-        "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yo'lda qoldim)",
+        "balance_detail": f"💰 <b>{{bot_name}} da Balans va Daromad:</b>\n\n💵 <b>Naqd tushum:</b> 0 som\n💳 <b>Karta tushum (Yandex):</b> <b>{{balance}} som</b>\n🔒 <b>Muzlatilgan:</b> {{blocked}} som\n➖➖➖➖➖➖➖➖➖➖\n✅ <b>Kartaga yechish mumkin:</b> <b>{{avail}} som</b>\n\n🚕 Yandex Pro holati: <b>{{y_status}}</b>",
+        "withdraw_min_err": "❌ Minimal yechish summasi: {min_w} som",
+        "withdraw_no_money": "❌ Balansingizda yechish uchun yetarli mablag mavjud emas!",
+        "withdraw_ask": f"💸 <b>Pul yechish (24/7 Avtomat):</b>\n\n🔹 Yechish mumkin: <b>{{avail}} som</b>\n🔹 Minimal summa: <b>{{min_w}} som</b>\n🔹 Komissiya: <b>{{comm}}%</b>\n\nYechmoqchi bolgan summani kiriting (Masalan: <i>50000</i>):",
+        "withdraw_confirm": "💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n💰 Yechilayotgan summa: <b>{amount} som</b>\n📊 Komissiya ({comm}%): <b>{comm_amount} som</b>\n💵 Kartaga tushadi: <b>{net_amount} som</b>\n💳 Karta: <code>{card}</code>",
+        "ref_text": f"👥 <b>Dostlarni taklif qiling va daromad oling!</b>\n\nHar bir taklif qilgan faol haydovchingiz uchun: <b>{REFERRAL_BONUS:,} som</b> bonus olasiz!\n\n🔗 Sizning taklif havolangiz:\n<code>{{link}}</code>",
+        "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n📞 <b>Menejer telefoni:</b> {SUPPORT_PHONE_DISPLAY}\n\nKerakli bolimni tanlang:",
+        "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yolda qoldim)",
         "sos_btn_msg": "✍️ Menejerga xabar / Shikoyat yozish",
         "sos_btn_chat": "💬 Menejer bilan shaxsiy chat",
         "sos_ask_loc": "📍 <b>Lokatsiya yoki joylashuvingizni yuboring:</b>\n\n📱 <b>Mobil telefonda:</b> Pastdagi tugmani bosing.\n💻 <b>Kompyuterda (Desktop):</b> Manzilingizni shu yerga yozib yuboring.\n\n<i>Bekor qilish uchun '❌ Bekor qilish' tugmasini bosing.</i>",
@@ -906,8 +910,10 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
     if user and user.get("is_registered") == 1:
         lang = user.get("language", "uz")
+        drv_name = user.get("full_name") or "Haydovchi"
+        pos_id = user.get("position") or "N/A"
         await message.answer(
-            t(lang, "already_reg", position=user.get("position", "N/A"), name=user.get("full_name", "Haydovchi")),
+            t(lang, "already_reg", position=pos_id, name=drv_name),
             reply_markup=user_main_kb(lang, uid)
         )
         return
@@ -931,8 +937,10 @@ async def lang_callback(callback: CallbackQuery, state: FSMContext) -> None:
 
     user = await db_get_user(uid)
     if user and user.get("is_registered") == 1:
+        drv_name = user.get("full_name") or "Haydovchi"
+        pos_id = user.get("position") or "N/A"
         await callback.message.answer(
-            t(lang, "already_reg", position=user.get("position", "N/A"), name=user.get("full_name", "Haydovchi")),
+            t(lang, "already_reg", position=pos_id, name=drv_name),
             reply_markup=user_main_kb(lang, uid)
         )
     else:
@@ -950,8 +958,10 @@ async def reg_start_flow(message: Message, state: FSMContext) -> None:
     lang = user.get("language", "uz") if user else "uz"
 
     if user and user.get("is_registered") == 1:
+        drv_name = user.get("full_name") or "Haydovchi"
+        pos_id = user.get("position") or "N/A"
         await message.answer(
-            t(lang, "already_reg", position=user.get("position", "N/A"), name=user.get("full_name", "Haydovchi")),
+            t(lang, "already_reg", position=pos_id, name=drv_name),
             reply_markup=user_main_kb(lang, uid)
         )
         return
@@ -983,9 +993,9 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
         pass
 
     if y_driver:
-        full_name = y_driver.get("full_name", "Haydovchi")
-        car_model = y_driver.get("car_model", "Chevrolet Cobalt")
-        car_number = y_driver.get("car_number", "Noma'lum")
+        full_name = y_driver.get("full_name") or "Haydovchi"
+        car_model = y_driver.get("car_model") or "Chevrolet Cobalt"
+        car_number = y_driver.get("car_number") or "Nomalum"
         y_id = y_driver.get("id")
 
         await state.update_data(
@@ -1019,7 +1029,7 @@ async def reg_step_name(message: Message, state: FSMContext) -> None:
     lang = await get_lang(uid)
     name = (message.text or "").strip()
     if len(name) < 3:
-        await message.answer("⚠️ Iltimos, ism va familiyangizni to'liq kiriting:")
+        await message.answer("⚠️ Iltimos, ism va familiyangizni toliq kiriting:")
         return
 
     await state.update_data(full_name=name)
@@ -1033,7 +1043,7 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
     lang = await get_lang(uid)
     card = (message.text or "").strip().replace(" ", "").replace("-", "")
     if not (card.isdigit() and len(card) == 16):
-        await message.answer("⚠️ Plastik karta 16 ta raqamdan iborat bo'lishi kerak. Qaytadan kiriting:")
+        await message.answer("⚠️ Plastik karta 16 ta raqamdan iborat bolishi kerak. Qaytadan kiriting:")
         return
 
     await state.update_data(card_number=card)
@@ -1067,11 +1077,11 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     lang = await get_lang(uid)
     await state.clear()
 
-    full_name = data.get("full_name", "Haydovchi")
-    phone = data.get("phone", "")
-    card = data.get("card_number", "")
-    car_model = data.get("car_model", "Chevrolet")
-    car_number = data.get("car_number", "")
+    full_name = data.get("full_name") or "Haydovchi"
+    phone = data.get("phone") or ""
+    card = data.get("card_number") or ""
+    car_model = data.get("car_model") or "Chevrolet"
+    car_number = data.get("car_number") or ""
     y_id = data.get("yandex_driver_id")
     yandex_status_text = "Ulangan" if y_id else "Ulanmagan"
 
@@ -1091,7 +1101,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
         try:
             await bot.send_message(
                 adm,
-                f"🆕 <b>Yangi haydovchi ro'yxatdan o'tdi!</b>\n\n"
+                f"🆕 <b>Yangi haydovchi royxatdan otdi!</b>\n\n"
                 f"👤 Ism: <b>{full_name}</b>\n"
                 f"📱 Telefon: <code>{phone}</code>\n"
                 f"🚗 Mashina: <b>{car_model} ({car_number})</b>\n"
@@ -1110,12 +1120,12 @@ async def balance_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval royxatdan oting: /start", reply_markup=register_reply_kb("uz"))
         return
 
     lang = user.get("language", "uz")
     cur_bal = float(user.get("balance", 0.0) or 0.0)
-    y_status = "✅ Ulangan" if user.get("yandex_driver_id") else "⚠️ Ulanmagan"
+    y_status = "Ulangan" if user.get("yandex_driver_id") else "Ulanmagan"
 
     if user.get("yandex_driver_id"):
         live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
@@ -1163,16 +1173,22 @@ async def top_drivers_handler(message: Message) -> None:
         if drivers_sorted and any(int(d.get("total_orders", 0) or 0) > 0 for d in drivers_sorted):
             for idx, drv in enumerate(drivers_sorted):
                 medal = medals[idx] if idx < len(medals) else f"{idx+1}."
-                text += f"{medal} <b>{drv.get('full_name', 'Haydovchi')}</b> (<code>{drv.get('position', 'N/A')}</code>) — <b>{drv.get('total_orders', 0)} ta zakaz</b>\n"
+                h_name = drv.get("full_name") or "Haydovchi"
+                h_pos = drv.get("position") or "N/A"
+                h_orders = drv.get("total_orders", 0)
+                text += f"{medal} <b>{h_name}</b> (<code>{h_pos}</code>) — <b>{h_orders} ta zakaz</b>\n"
         else:
             text += "<i>Hozircha haftalik reyting shakllanmoqda...</i>\n"
-        text += "\n🔥 <i>Ko'proq buyurtma bajaring va haftalik maxsus bonuslarga ega bo'ling!</i>"
+        text += "\n🔥 <i>Koproq buyurtma bajaring va haftalik maxsus bonuslarga ega boling!</i>"
     else:
         text = f"🏆 <b>{BOT_NAME} — ТОП Водителей Недели:</b>\n\n"
         if drivers_sorted and any(int(d.get("total_orders", 0) or 0) > 0 for d in drivers_sorted):
             for idx, drv in enumerate(drivers_sorted):
                 medal = medals[idx] if idx < len(medals) else f"{idx+1}."
-                text += f"{medal} <b>{drv.get('full_name', 'Водитель')}</b> (<code>{drv.get('position', 'N/A')}</code>) — <b>{drv.get('total_orders', 0)} заказов</b>\n"
+                h_name = drv.get("full_name") or "Водитель"
+                h_pos = drv.get("position") or "N/A"
+                h_orders = drv.get("total_orders", 0)
+                text += f"{medal} <b>{h_name}</b> (<code>{h_pos}</code>) — <b>{h_orders} заказов</b>\n"
         else:
             text += "<i>Рейтинг недели формируется...</i>\n"
         text += "\n🔥 <i>Выполняйте больше поездок и получайте еженедельные бонусы!</i>"
@@ -1185,32 +1201,40 @@ async def profile_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval royxatdan oting: /start", reply_markup=register_reply_kb("uz"))
         return
 
     lang = user.get("language", "uz")
+    pos_val = user.get("position") or "N/A"
+    name_val = user.get("full_name") or "Haydovchi"
+    phone_val = user.get("phone") or ""
+    car_m_val = user.get("car_model") or ""
+    car_n_val = user.get("car_number") or ""
+    card_val = user.get("card_number") or ""
+    y_val = "Ulangan" if user.get("yandex_driver_id") else "Ulanmagan"
+
     if lang == "uz":
         text = (
             f"👤 <b>Haydovchi Profili:</b>\n\n"
-            f"🆔 POSITION: <code>{user.get('position', 'N/A')}</code>\n"
-            f"👤 Ism: <b>{user.get('full_name')}</b>\n"
-            f"📱 Telefon: <b>{user.get('phone')}</b>\n"
-            f"🚗 Avtomobil: <b>{user.get('car_model')} ({user.get('car_number')})</b>\n"
-            f"💳 Karta: <code>{user.get('card_number')}</code>\n"
-            f"🚕 Yandex: <b>{'✅ Ulangan' if user.get('yandex_driver_id') else '⚠️ Ulanmagan'}</b>\n"
-            f"🌐 Til: <b>O'zbekcha 🇺🇿</b>"
+            f"🆔 POSITION: <code>{pos_val}</code>\n"
+            f"👤 Ism: <b>{name_val}</b>\n"
+            f"📱 Telefon: <b>{phone_val}</b>\n"
+            f"🚗 Avtomobil: <b>{car_m_val} ({car_n_val})</b>\n"
+            f"💳 Karta: <code>{card_val}</code>\n"
+            f"🚕 Yandex: <b>{y_val}</b>\n"
+            f"🌐 Til: <b>Ozbekcha</b>"
         )
-        change_lang_btn = "🌐 Tilni o'zgartirish"
+        change_lang_btn = "🌐 Tilni ozgartirish"
     else:
         text = (
             f"👤 <b>Профиль Водителя:</b>\n\n"
-            f"🆔 POSITION: <code>{user.get('position', 'N/A')}</code>\n"
-            f"👤 Имя: <b>{user.get('full_name')}</b>\n"
-            f"📱 Телефон: <b>{user.get('phone')}</b>\n"
-            f"🚗 Автомобиль: <b>{user.get('car_model')} ({user.get('car_number')})</b>\n"
-            f"💳 Карта: <code>{user.get('card_number')}</code>\n"
-            f"🚕 Яндекс: <b>{'✅ Привязан' if user.get('yandex_driver_id') else '⚠️ Не привязан'}</b>\n"
-            f"🌐 Язык: <b>Русский 🇷🇺</b>"
+            f"🆔 POSITION: <code>{pos_val}</code>\n"
+            f"👤 Имя: <b>{name_val}</b>\n"
+            f"📱 Телефон: <b>{phone_val}</b>\n"
+            f"🚗 Автомобиль: <b>{car_m_val} ({car_n_val})</b>\n"
+            f"💳 Карта: <code>{card_val}</code>\n"
+            f"🚕 Яндекс: <b>{y_val}</b>\n"
+            f"🌐 Язык: <b>Русский</b>"
         )
         change_lang_btn = "🌐 Сменить язык"
 
@@ -1241,7 +1265,7 @@ async def referral_handler(message: Message) -> None:
 @router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа"]))
 async def group_handler(message: Message) -> None:
     lang = await get_lang(message.from_user.id)
-    btn_text = "💬 Haydovchilar guruhiga qo'shilish" if lang == "uz" else "💬 Вступить в группу водителей"
+    btn_text = "💬 Haydovchilar guruhiga qoshilish" if lang == "uz" else "💬 Вступить в группу водителей"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_text, url=DRIVER_GROUP_LINK)]])
     await message.answer(f"📢 <b>{BOT_NAME} Rasmiy Guruhimiz:</b>", reply_markup=kb)
 
@@ -1254,7 +1278,7 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval royxatdan oting: /start", reply_markup=register_reply_kb("uz"))
         return
 
     lang = user.get("language", "uz")
@@ -1271,8 +1295,8 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
     if avail < MIN_WITHDRAWAL:
         await message.answer(
             f"{t(lang, 'withdraw_no_money')}\n\n"
-            f"🔹 Yechish mumkin: <b>{fmt_sum(avail)} so'm</b>\n"
-            f"🔹 Minimal: <b>{fmt_sum(MIN_WITHDRAWAL)} so'm</b>",
+            f"🔹 Yechish mumkin: <b>{fmt_sum(avail)} som</b>\n"
+            f"🔹 Minimal: <b>{fmt_sum(MIN_WITHDRAWAL)} som</b>",
             reply_markup=user_main_kb(lang, uid)
         )
         return
@@ -1291,7 +1315,7 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
 async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
-    raw = (message.text or "").replace(" ", "").replace("so'm", "").replace("сум", "").strip()
+    raw = (message.text or "").replace(" ", "").replace("so'm", "").replace("som", "").replace("сум", "").strip()
 
     if not raw.isdigit():
         await message.answer("⚠️ Iltimos, summani faqat musbat raqamlarda kiriting (Masalan: <i>50000</i>):")
@@ -1308,13 +1332,14 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         return
 
     if amount > avail:
-        await message.answer(f"❌ Mablag' yetarli emas! Siz ko'pi bilan <b>{fmt_sum(avail)} so'm</b> yecha olasiz.")
+        await message.answer(f"❌ Mablag yetarli emas! Siz kopi bilan <b>{fmt_sum(avail)} som</b> yecha olasiz.")
         return
 
     comm = amount * (COMMISSION_PERCENT / 100.0)
     net = amount - comm
+    card_val = user.get("card_number") or ""
 
-    await state.update_data(amount=amount, commission=comm, net_amount=net, card=user.get("card_number", ""))
+    await state.update_data(amount=amount, commission=comm, net_amount=net, card=card_val)
     await state.set_state(WithdrawStates.confirm)
 
     btn_text = "⚡️ Avtomat Yechish (24/7)" if lang == "uz" else "⚡️ Авто Вывод (24/7)"
@@ -1335,7 +1360,7 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
           comm=COMMISSION_PERCENT,
           comm_amount=fmt_sum(comm),
           net_amount=fmt_sum(net),
-          card=user.get("card_number", "")),
+          card=card_val),
         reply_markup=kb
     )
 
@@ -1380,30 +1405,34 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
     if brb_res.get("success"):
         msg = (
-            f"✅ <b>Mablag' kartangizga muvaffaqiyatli o'tkazildi!</b>\n\n"
-            f"💰 Yechilgan: <b>{fmt_sum(amount)} so'm</b>\n"
-            f"💵 Kartaga tushdi: <b>{fmt_sum(net_amount)} so'm</b>\n"
+            f"✅ <b>Mablag kartangizga muvaffaqiyatli otkazildi!</b>\n\n"
+            f"💰 Yechilgan: <b>{fmt_sum(amount)} som</b>\n"
+            f"💵 Kartaga tushdi: <b>{fmt_sum(net_amount)} som</b>\n"
             f"💳 Karta: <code>{card}</code>"
         )
     else:
         msg = (
             f"✅ <b>Pul yechish arizangiz qabul qilindi!</b>\n\n"
-            f"💰 Summa: <b>{fmt_sum(net_amount)} so'm</b>\n"
+            f"💰 Summa: <b>{fmt_sum(net_amount)} som</b>\n"
             f"💳 Karta: <code>{card}</code>\n\n"
-            f"<i>Mablag' tez orada kartangizga o'tkaziladi.</i>"
+            f"<i>Mablag tez orada kartangizga otkaziladi.</i>"
         )
 
     await callback.message.edit_text(msg)
     await callback.answer()
+
+    drv_name = user.get("full_name") or "Haydovchi"
+    drv_pos = user.get("position") or "N/A"
+    drv_phone = user.get("phone") or ""
 
     for adm in ADMIN_IDS:
         try:
             await bot.send_message(
                 adm,
                 f"💸 <b>Yangi pul yechish:</b>\n\n"
-                f"👤 Haydovchi: <b>{user.get('full_name')}</b> (<code>{user.get('position')}</code>)\n"
-                f"📱 Telefon: <code>{user.get('phone')}</code>\n"
-                f"💰 Summa: <b>{fmt_sum(amount)} so'm</b>\n"
+                f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
+                f"📱 Telefon: <code>{drv_phone}</code>\n"
+                f"💰 Summa: <b>{fmt_sum(amount)} som</b>\n"
                 f"💳 Karta: <code>{card}</code>\n"
                 f"📊 Holat: <b>{status}</b>"
             )
@@ -1437,17 +1466,23 @@ async def sos_receive_location_geo(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
     await state.clear()
-    user = await db_get_user(uid)
+    user = await db_get_user(uid) or {}
 
     lat = message.location.latitude
     lon = message.location.longitude
     maps_url = f"https://maps.google.com/?q={lat},{lon}"
 
+    drv_name = user.get("full_name") or "Haydovchi"
+    drv_pos = user.get("position") or "N/A"
+    drv_phone = user.get("phone") or "Nomalum"
+    drv_car_m = user.get("car_model") or ""
+    drv_car_n = user.get("car_number") or ""
+
     alert = (
         f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / LOKATSIYA!</b>\n\n"
-        f"👤 Haydovchi: <b>{user.get('full_name', 'Haydovchi')}</b> (<code>{user.get('position', 'N/A')}</code>)\n"
-        f"📱 Telefon: <code>{user.get('phone', 'Noma\'lum')}</code>\n"
-        f"🚗 Mashina: <b>{user.get('car_model', '')} ({user.get('car_number', '')})</b>\n\n"
+        f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
+        f"📱 Telefon: <code>{drv_phone}</code>\n"
+        f"🚗 Mashina: <b>{drv_car_m} ({drv_car_n})</b>\n\n"
         f"📍 <a href='{maps_url}'>Google Xaritada ochish</a>"
     )
 
@@ -1476,14 +1511,20 @@ async def sos_receive_location_text(message: Message, state: FSMContext) -> None
         return
 
     await state.clear()
-    user = await db_get_user(uid)
+    user = await db_get_user(uid) or {}
     address_text = message.text.strip()
+
+    drv_name = user.get("full_name") or "Haydovchi"
+    drv_pos = user.get("position") or "N/A"
+    drv_phone = user.get("phone") or "Nomalum"
+    drv_car_m = user.get("car_model") or ""
+    drv_car_n = user.get("car_number") or ""
 
     alert = (
         f"🚨 <b>DIQQAT: HAYDOVCHIDAN SOS / MANZIL (DESKTOP):</b>\n\n"
-        f"👤 Haydovchi: <b>{user.get('full_name', 'Haydovchi')}</b> (<code>{user.get('position', 'N/A')}</code>)\n"
-        f"📱 Telefon: <code>{user.get('phone', 'Noma\'lum')}</code>\n"
-        f"🚗 Mashina: <b>{user.get('car_model', '')} ({user.get('car_number', '')})</b>\n\n"
+        f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
+        f"📱 Telefon: <code>{drv_phone}</code>\n"
+        f"🚗 Mashina: <b>{drv_car_m} ({drv_car_n})</b>\n\n"
         f"📍 <b>Manzil / Holat:</b>\n{address_text}"
     )
 
@@ -1523,14 +1564,20 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
         return
 
     await state.clear()
-    user = await db_get_user(uid)
+    user = await db_get_user(uid) or {}
     msg_body = message.text or "[Xabar]"
+
+    drv_name = user.get("full_name") or "Haydovchi"
+    drv_pos = user.get("position") or "N/A"
+    drv_phone = user.get("phone") or "Nomalum"
+    drv_car_m = user.get("car_model") or ""
+    drv_car_n = user.get("car_number") or ""
 
     alert = (
         f"📩 <b>HAYDOVCHIDAN MUROJAAT / XABAR:</b>\n\n"
-        f"👤 Haydovchi: <b>{user.get('full_name', 'Haydovchi')}</b> (<code>{user.get('position', 'N/A')}</code>)\n"
-        f"📱 Telefon: <code>{user.get('phone', 'Noma\'lum')}</code>\n"
-        f"🚗 Mashina: <b>{user.get('car_model', '')} ({user.get('car_number', '')})</b>\n\n"
+        f"👤 Haydovchi: <b>{drv_name}</b> (<code>{drv_pos}</code>)\n"
+        f"📱 Telefon: <code>{drv_phone}</code>\n"
+        f"🚗 Mashina: <b>{drv_car_m} ({drv_car_n})</b>\n\n"
         f"✍️ <b>Xabar matni:</b>\n{msg_body}"
     )
 
@@ -1566,11 +1613,11 @@ async def admin_stats_handler(message: Message) -> None:
     text = (
         f"📊 <b>{BOT_NAME} — Umumiy Tizim Statistikasi:</b>\n\n"
         f"👥 Botga kirgan jami foydalanuvchilar: <b>{stats['total_users']} ta</b>\n"
-        f"🚕 Ro'yxatdan o'tgan haydovchilar: <b>{stats['registered_drivers']} ta</b>\n"
+        f"🚕 Royxatdan otgan haydovchilar: <b>{stats['registered_drivers']} ta</b>\n"
         f"🔗 Yandex Pro ulangan haydovchilar: <b>{stats['yandex_linked']} ta</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
-        f"💸 Jami yechilgan mablag': <b>{fmt_sum(stats['total_withdrawn'])} so'm</b>\n"
-        f"📈 Taksopark komissiyasi: <b>{fmt_sum(stats['total_comm'])} so'm</b>"
+        f"💸 Jami yechilgan mablag: <b>{fmt_sum(stats['total_withdrawn'])} som</b>\n"
+        f"📈 Taksopark komissiyasi: <b>{fmt_sum(stats['total_comm'])} som</b>"
     )
     await message.answer(text)
 
@@ -1606,7 +1653,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
     drivers = await yandex_api.get_all_drivers(limit=1000)
 
     if not drivers:
-        await status_msg.edit_text("❌ Yandex API dan ma'lumot olib bo'lmadi. API kalitlarini tekshiring.")
+        await status_msg.edit_text("❌ Yandex API dan ma'lumot olib bolmadi. API kalitlarini tekshiring.")
         return
 
     count = 0
@@ -1666,7 +1713,7 @@ async def admin_broadcast_prompt(message: Message, state: FSMContext) -> None:
     if message.from_user.id not in ADMIN_IDS:
         return
     await state.set_state(AdminBroadcastStates.waiting_for_message)
-    await message.answer("📢 <b>Barcha haydovchilarga yubormoqchi bo'lgan xabaringizni yozing:</b>\n\n<i>Bekor qilish: '❌ Bekor qilish'</i>", reply_markup=cancel_kb("uz"))
+    await message.answer("📢 <b>Barcha haydovchilarga yubormoqchi bolgan xabaringizni yozing:</b>\n\n<i>Bekor qilish: '❌ Bekor qilish'</i>", reply_markup=cancel_kb("uz"))
 
 
 @admin_router.message(AdminBroadcastStates.waiting_for_message)
@@ -1704,15 +1751,22 @@ async def admin_list_drivers(message: Message) -> None:
         return
     drivers = await db_get_all_registered_drivers()
     if not drivers:
-        await message.answer("Hozircha ro'yxatdan o'tgan haydovchilar yo'q.")
+        await message.answer("Hozircha royxatdan otgan haydovchilar yoq.")
         return
 
-    text = f"👥 <b>Ro'yxatdan o'tgan so'nggi haydovchilar (Jami: {len(drivers)} ta):</b>\n\n"
+    text = f"👥 <b>Royxatdan otgan songgi haydovchilar (Jami: {len(drivers)} ta):</b>\n\n"
     for drv in drivers[-10:]:
+        drv_pos = drv.get("position") or "N/A"
+        drv_name = drv.get("full_name") or "Haydovchi"
+        drv_phone = drv.get("phone") or ""
+        drv_car_m = drv.get("car_model") or ""
+        drv_car_n = drv.get("car_number") or ""
+        drv_bal = fmt_sum(drv.get("balance", 0))
+
         text += (
-            f"🆔 <code>{drv.get('position', 'N/A')}</code> — <b>{drv.get('full_name')}</b>\n"
-            f"📱 {drv.get('phone')} | 🚗 {drv.get('car_model')} ({drv.get('car_number')})\n"
-            f"💰 Balans: <b>{fmt_sum(drv.get('balance', 0))} so'm</b>\n---------------------------\n"
+            f"🆔 <code>{drv_pos}</code> — <b>{drv_name}</b>\n"
+            f"📱 {drv_phone} | 🚗 {drv_car_m} ({drv_car_n})\n"
+            f"💰 Balans: <b>{drv_bal} som</b>\n---------------------------\n"
         )
     await message.answer(text)
 
@@ -1747,12 +1801,18 @@ async def admin_inactive_drivers(message: Message) -> None:
         await message.answer("✅ Barcha haydovchilar faol!")
         return
 
-    text = f"🚫 <b>10+ kundan beri faol bo'lmagan haydovchilar ({len(inactive)} ta):</b>\n\n"
+    text = f"🚫 <b>10+ kundan beri faol bolmagan haydovchilar ({len(inactive)} ta):</b>\n\n"
     for drv in inactive:
+        drv_name = drv.get("full_name") or "Haydovchi"
+        drv_phone = drv.get("phone") or ""
+        drv_car_m = drv.get("car_model") or ""
+        drv_car_n = drv.get("car_number") or ""
+        drv_act = str(drv.get("last_activity") or "Nomalum")[:10]
+
         text += (
-            f"👤 <b>{drv.get('full_name')}</b> | 📱 Tel: {drv.get('phone')}\n"
-            f"🚗 {drv.get('car_model')} ({drv.get('car_number')})\n"
-            f"📅 Faollik: {str(drv.get('last_activity', 'Noma\'lum'))[:10]}\n---------------------------\n"
+            f"👤 <b>{drv_name}</b> | 📱 Tel: {drv_phone}\n"
+            f"🚗 {drv_car_m} ({drv_car_n})\n"
+            f"📅 Faollik: {drv_act}\n---------------------------\n"
         )
     await message.answer(text)
 
