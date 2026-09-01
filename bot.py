@@ -5,7 +5,7 @@ import asyncio
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any, Optional, List, Set, Dict
+from typing import Any, Optional, List, Set, Tuple
 from datetime import datetime, timezone, timedelta
 
 import aiohttp
@@ -72,7 +72,7 @@ BRB_API_KEY = os.getenv("BRB_API_KEY", "").strip()
 BRB_MERCHANT_ID = os.getenv("BRB_MERCHANT_ID", "").strip()
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
-MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))  # Mashina ishlashi uchun qoladigan depozit
+MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))  # Mashina ishlashi uchun qolishi shart bo'lgan depozit
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "0.0"))  # Park komissiyasi %
 REFERRAL_BONUS = int(os.getenv("REFERRAL_BONUS", "30000"))
 
@@ -225,16 +225,12 @@ async def db_get_user(telegram_id: int) -> Optional[dict]:
 async def db_get_user_by_id(user_id: int) -> Optional[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM users WHERE id = $1", user_id
-            )
+            row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
             return dict(row) if row else None
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM users WHERE id = ?", (user_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         conn.close()
         return dict(row) if row else None
 
@@ -242,16 +238,12 @@ async def db_get_user_by_id(user_id: int) -> Optional[dict]:
 async def db_get_user_by_phone(phone: str) -> Optional[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM users WHERE phone = $1", phone
-            )
+            row = await conn.fetchrow("SELECT * FROM users WHERE phone = $1", phone)
             return dict(row) if row else None
     else:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM users WHERE phone = ?", (phone,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
         conn.close()
         return dict(row) if row else None
 
@@ -433,7 +425,6 @@ async def db_update_withdrawal_status(w_id: int, status: str, ext_tx_id: str = "
 
 
 async def db_refund_withdrawal(w_id: int):
-    """Rad etilganda mablag'ni balansga qaytarish"""
     wd = await db_get_withdrawal(w_id)
     if not wd or wd.get("status") == "refunded":
         return
@@ -501,7 +492,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# YANDEX FLEET API (To'g'ri fields va Buyurtmalar integratsiyasi)
+# YANDEX FLEET API (Barcha tuzatishlar bilan)
 # ============================================================
 
 class YandexFleetAPI:
@@ -514,7 +505,7 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 300
+        self._cache_ttl = 180  # 3 daqiqa kesh
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -524,6 +515,7 @@ class YandexFleetAPI:
         return {
             "X-Client-ID": self.client_id,
             "X-API-Key": self.api_key,
+            "X-Park-ID": self.park_id,  # Majburiy header
             "Content-Type": "application/json",
             "Accept-Language": "ru",
         }
@@ -537,27 +529,26 @@ class YandexFleetAPI:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def get_all_drivers(self, force_refresh: bool = False) -> List[dict]:
+    async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
         if not self._is_configured():
-            logger.warning("Yandex API kalitlari kiritilmagan.")
-            return []
+            return [], "Yandex API kalitlari (API_KEY, CLIENT_ID, PARK_ID) .env faylida to'liq emas!"
+
         now = datetime.now()
         if (not force_refresh and self._drivers_cache and self._cache_ts
                 and (now - self._cache_ts).total_seconds() < self._cache_ttl):
-            return self._drivers_cache
+            return self._drivers_cache, ""
+
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
         all_drivers: List[dict] = []
         limit, offset = 500, 0
+        last_error = ""
+
         try:
             session = await self._get_session()
             while True:
                 payload = {
-                    "query": {"park": {"id": self.park_id}},
-                    "fields": {
-                        "driver_profile": ["id", "phones", "first_name", "last_name", "middle_name"],
-                        "car": ["id", "brand", "model", "number", "brand_and_model", "normalized_number"],
-                        "account": ["balance", "balance_limit", "currency", "id", "type"],
-                        "status": ["orders_provider"]
+                    "query": {
+                        "park": {"id": self.park_id}
                     },
                     "limit": limit,
                     "offset": offset
@@ -566,8 +557,10 @@ class YandexFleetAPI:
                     import json as _j
                     text = await resp.text()
                     if resp.status != 200:
-                        logger.error(f"Yandex get_all_drivers: HTTP {resp.status} | {text[:300]}")
+                        last_error = f"HTTP {resp.status}: {text[:250]}"
+                        logger.error(f"Yandex get_all_drivers xatosi: {last_error}")
                         break
+
                     data = _j.loads(text)
                     batch = data.get("driver_profiles", [])
                     all_drivers.extend(batch)
@@ -575,18 +568,23 @@ class YandexFleetAPI:
                         break
                     offset += limit
         except Exception as e:
+            last_error = f"Ulanish xatosi: {str(e)}"
             logger.error(f"Yandex get_all_drivers exception: {e}")
-        self._drivers_cache = all_drivers
-        self._cache_ts = now
-        logger.info(f"Yandex: {len(all_drivers)} ta haydovchi yuklandi.")
-        return all_drivers
+
+        if all_drivers:
+            self._drivers_cache = all_drivers
+            self._cache_ts = now
+            logger.info(f"Yandex: {len(all_drivers)} ta haydovchi yuklandi.")
+            return all_drivers, ""
+
+        return [], last_error
 
     async def get_driver_by_phone(self, phone: str) -> Optional[dict]:
         if not self._is_configured():
             return None
         digits = re.sub(r"\D", "", phone)
         short9 = digits[-9:] if len(digits) >= 9 else digits
-        drivers = await self.get_all_drivers(force_refresh=True)
+        drivers, _ = await self.get_all_drivers(force_refresh=True)
         for raw in drivers:
             prof = raw.get("driver_profile", {})
             for p in prof.get("phones", []):
@@ -634,7 +632,7 @@ class YandexFleetAPI:
         }
 
     async def get_driver_balance(self, yandex_driver_id: str) -> Optional[float]:
-        """Real vaqtda haydovchining jonli balansini qaytaradi"""
+        """Jonli balansni olish"""
         if not self._is_configured() or not yandex_driver_id:
             return None
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
@@ -642,10 +640,6 @@ class YandexFleetAPI:
             "query": {
                 "park": {"id": self.park_id},
                 "driver": {"id": [yandex_driver_id]}
-            },
-            "fields": {
-                "driver_profile": ["id"],
-                "account": ["balance", "currency", "type", "id"]
             },
             "limit": 1
         }
@@ -664,7 +658,6 @@ class YandexFleetAPI:
         return None
 
     async def get_today_orders_stats(self, yandex_driver_id: str) -> dict:
-        """Bugungi kunlik buyurtmalar va tushumlar statistikasini olish"""
         default_res = {
             "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0,
             "total_earnings": 0.0, "cash_earnings": 0.0, "card_earnings": 0.0, "park_comm": 0.0
@@ -672,7 +665,6 @@ class YandexFleetAPI:
         if not self._is_configured() or not yandex_driver_id:
             return default_res
 
-        # Bugungi kun 00:00 (Toshkent vaqti UTC+5)
         now_utc = datetime.now(timezone.utc)
         today_start_utc = (now_utc - timedelta(hours=5)).replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -700,11 +692,8 @@ class YandexFleetAPI:
                 if resp.status == 200:
                     data = _j.loads(text)
                     orders = data.get("orders", [])
-                    comp = 0
-                    canc = 0
-                    total_sum = 0.0
-                    cash_sum = 0.0
-                    card_sum = 0.0
+                    comp = canc = 0
+                    total_sum = cash_sum = card_sum = 0.0
                     for o in orders:
                         st = o.get("status", "").lower()
                         cost = float(o.get("cost", 0.0) or 0.0)
@@ -729,7 +718,7 @@ class YandexFleetAPI:
                         "park_comm": comm
                     }
         except Exception as e:
-            logger.error(f"Yandex get_today_orders_stats: {e}")
+            logger.error(f"Yandex get_today_orders_stats xatosi: {e}")
         return default_res
 
     async def create_transaction(self, yandex_driver_id: str, amount: float, description: str) -> bool:
@@ -790,7 +779,7 @@ class BRBPaymentAPI:
 
     async def send_payout(self, card_number: str, amount: float, order_id: int, retries: int = 3) -> dict:
         if not self._is_configured():
-            return {"success": False, "message": "BRB API sozlanmagan (manual rejim)"}
+            return {"success": False, "message": "BRB API sozlanmagan"}
         payload = {
             "card_number": card_number.replace(" ", "").replace("-", ""),
             "amount": int(amount),
@@ -1560,9 +1549,8 @@ async def admin_approve_payout(callback: CallbackQuery):
         return
 
     # Yandex Pro dan tranzaksiya yechish
-    y_ok = True
     if user.get("yandex_driver_id"):
-        y_ok = await yandex_api.create_transaction(
+        await yandex_api.create_transaction(
             user["yandex_driver_id"],
             float(wd["amount"]),
             f"Lochin Taxi Bot to'lovi #{w_id} ({wd.get('card_number','')})"
@@ -1570,7 +1558,6 @@ async def admin_approve_payout(callback: CallbackQuery):
 
     await db_update_withdrawal_status(w_id, "completed")
 
-    # Xabarni yangilash
     try:
         await callback.message.edit_text(
             f"{callback.message.text}\n\n✅ <b>TO'LANDI VA YANDEX PRODAN YECHILDI!</b>\n👨‍💻 Admin: {callback.from_user.full_name}"
@@ -1579,7 +1566,6 @@ async def admin_approve_payout(callback: CallbackQuery):
         pass
     await callback.answer("To'lov tasdiqlandi!")
 
-    # Haydovchiga xushxabar yuborish
     try:
         await bot.send_message(
             user["telegram_id"],
@@ -1604,7 +1590,6 @@ async def admin_reject_payout(callback: CallbackQuery):
         await callback.answer("Bu ariza allaqachon ko'rib chiqilgan!", show_alert=True)
         return
 
-    # Mablag'ni haydovchi balansiga qaytarish
     await db_refund_withdrawal(w_id)
 
     user = await db_get_user_by_id(wd["user_id"])
@@ -1736,6 +1721,27 @@ async def sos_receive_location_geo(message: Message, state: FSMContext) -> None:
     await message.answer(t(lang, "sos_sent"), reply_markup=user_main_kb(lang, uid))
 
 
+@router.message(SOSStates.waiting_for_location, F.text)
+async def sos_receive_location_text(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    lang = await get_lang(uid)
+    if message.text in CANCEL_TEXTS:
+        await state.clear()
+        await message.answer(t(lang, "action_cancelled"), reply_markup=user_main_kb(lang, uid))
+        return
+    await state.clear()
+    user = await db_get_user(uid) or {}
+    alert = (f"🚨 <b>SOS / MANZIL (DESKTOP):</b>\n\n👤 {user.get('full_name','Nomalum')} (<code>{user.get('position','N/A')}</code>)\n"
+              f"📱 <code>{user.get('phone','Nomalum')}</code>\n🚗 {user.get('car_model','')} ({user.get('car_number','')})\n\n📍 <b>Manzil:</b>\n{message.text.strip()}")
+    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")]])
+    for adm in ADMIN_IDS:
+        try:
+            await bot.send_message(adm, alert, reply_markup=adm_kb)
+        except Exception:
+            pass
+    await message.answer(t(lang, "sos_sent"), reply_markup=user_main_kb(lang, uid))
+
+
 @router.callback_query(F.data == "sos:msg")
 async def sos_message_flow(callback: CallbackQuery, state: FSMContext) -> None:
     lang = await get_lang(callback.from_user.id)
@@ -1822,10 +1828,19 @@ async def admin_sync_all_drivers(message: Message) -> None:
     if message.from_user.id not in ADMIN_IDS:
         return
     status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar yuklanmoqda...</i>")
-    drivers = await yandex_api.get_all_drivers(force_refresh=True)
+    
+    drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
     if not drivers:
-        await status_msg.edit_text("❌ Yandex API dan ma'lumot olib bo'lmadi.")
+        await status_msg.edit_text(
+            f"❌ <b>Yandex API dan ma'lumot olib bo'lmadi!</b>\n\n"
+            f"🔍 <b>Xatolik sababi:</b>\n<code>{err_msg or 'Noma\'lum xatolik'}</code>\n\n"
+            f"📌 <i>Tekshiring:</i>\n"
+            f"• <code>YANDEX_API_KEY</code>\n"
+            f"• <code>YANDEX_CLIENT_ID</code>\n"
+            f"• <code>YANDEX_PARK_ID</code>"
+        )
         return
+
     updated_count = 0
     now = utc_now_iso()
     for raw_drv in drivers:
@@ -1837,21 +1852,30 @@ async def admin_sync_all_drivers(message: Message) -> None:
         if db_pool:
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE users SET full_name=$1, car_model=$2, car_number=$3, yandex_driver_id=$4, balance=$5, updated_at=$6 WHERE phone=$7",
+                    """UPDATE users SET 
+                        full_name=$1, car_model=$2, car_number=$3, 
+                        yandex_driver_id=$4, balance=$5, updated_at=$6 
+                    WHERE phone=$7""",
                     norm["full_name"], norm["car_model"], norm["car_number"], y_id, norm["balance"], now, phone,
                 )
         else:
             conn = sqlite3.connect(DB_PATH)
             conn.execute(
-                "UPDATE users SET full_name=?, car_model=?, car_number=?, yandex_driver_id=?, balance=?, updated_at=? WHERE phone=?",
+                """UPDATE users SET 
+                    full_name=?, car_model=?, car_number=?, 
+                    yandex_driver_id=?, balance=?, updated_at=? 
+                WHERE phone=?""",
                 (norm["full_name"], norm["car_model"], norm["car_number"], y_id, norm["balance"], now, phone),
             )
             conn.commit()
             conn.close()
         updated_count += 1
+
     await status_msg.edit_text(
-        f"✅ <b>Yandex sinxronlash yakunlandi!</b>\n\n🚕 Jami Yandex haydovchilari: <b>{len(drivers)} ta</b>\n"
-        f"🔄 Bazada yangilangan: <b>{updated_count} ta</b>"
+        f"✅ <b>Yandex sinxronlash muvaffaqiyatli yakunlandi!</b>\n\n"
+        f"🚕 Jami Yandex haydovchilari: <b>{len(drivers)} ta</b>\n"
+        f"🔄 Bazada yangilangan: <b>{updated_count} ta</b>\n\n"
+        f"<i>Barcha haydovchilar ma'lumotlari va jonli balanslari yangilandi.</i>"
     )
 
 
