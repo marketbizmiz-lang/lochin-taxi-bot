@@ -1906,6 +1906,7 @@ async def profile_handler(message: Message) -> None:
     u_model = user.get("car_model", "")
     u_num = user.get("car_number", "")
     u_card_masked = mask_card(user.get("card_number", ""))
+    lang_display = "O'zbekcha" if lang == "uz" else "Русский"
 
     text = (
         f"👤 <b>Haydovchi Profili:</b>\n\n"
@@ -1915,7 +1916,7 @@ async def profile_handler(message: Message) -> None:
         f"🚗 Avtomobil: <b>{u_model} ({u_num})</b>\n"
         f"💳 Karta: <code>{u_card_masked}</code>\n"
         f"🚕 Yandex: <b>{y_val}</b>\n"
-        f"🌐 Til: <b>{'O\'zbekcha' if lang == 'uz' else 'Русский'}</b>"
+        f"🌐 Til: <b>{lang_display}</b>"
     )
     btn_txt = "🌐 Tilni o'zgartirish" if lang == "uz" else "🌐 Сменить язык"
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_txt, callback_data="change_lang_menu")]]))
