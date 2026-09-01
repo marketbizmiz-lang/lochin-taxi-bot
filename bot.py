@@ -19,7 +19,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from aiohttp import web
 
-# Cryptography xavfsiz modul tekshiruvi (Hech qachon ModuleNotFoundError bermaydi)
+# Cryptography xavfsiz modul tekshiruvi (Hech qachon xato bermaydi)
 try:
     from cryptography.fernet import Fernet
     HAS_CRYPTOGRAPHY = True
@@ -45,7 +45,7 @@ from aiogram.types import (
 )
 
 # ============================================================
-# 1. ASOSIY SOZLAMALAR VA AVTOMATIK XAVFSIZLIK
+# 1. ASOSIY SOZLAMALAR VA AVTOMATIK ADMIN PARSING
 # ============================================================
 
 logging.basicConfig(
@@ -63,24 +63,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_NAME = os.getenv("BOT_NAME", "LOCHIN TAXI").strip() or "LOCHIN TAXI"
 PORT = int(os.getenv("PORT", "8080"))
 
-# ADMIN_IDS — .env orqali olinadi
+# ADMIN_IDS — Qavs, qo'shtirnoq, probellardan to'liq tozalangan xatosiz parsing
 ADMIN_IDS: Set[int] = set()
-_env_admins = os.getenv("ADMIN_IDS", "").strip()
-if _env_admins:
-    for _adm in _env_admins.split(","):
-        _adm_clean = _adm.strip()
-        if _adm_clean.isdigit():
-            ADMIN_IDS.add(int(_adm_clean))
+_raw_admins = str(os.getenv("ADMIN_IDS", "")) + " " + str(os.getenv("ADMIN_ID", ""))
+for _adm_str in re.findall(r"\d+", _raw_admins):
+    ADMIN_IDS.add(int(_adm_str))
 
-MANAGER_TG_ID = int(os.getenv("MANAGER_TG_ID", "0"))
+MANAGER_TG_ID = int(os.getenv("MANAGER_TG_ID", "0") if os.getenv("MANAGER_TG_ID", "0").isdigit() else 0)
 if MANAGER_TG_ID > 0:
     ADMIN_IDS.add(MANAGER_TG_ID)
+
+logger.info(f"Muvaffaqiyatli yuklangan ADMIN_IDS: {ADMIN_IDS}")
 
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
-# ENCRYPTION_KEY — Avtomatik xavfsiz kalit
+# ENCRYPTION_KEY — Avtomatik himoyalangan kalit (Crash bermaydi)
 raw_key = os.getenv("ENCRYPTION_KEY", "").strip()
 if not raw_key or len(raw_key) < 16:
     raw_key = hashlib.sha256((BOT_TOKEN or "LOCHIN_TAXI_DEFAULT_SALT_2026").encode()).hexdigest()
@@ -131,6 +130,11 @@ UZ_MONTHS = {
 # 2. XAVFSIZLIK VA YORDAMCHI FUNKSIYALAR
 # ============================================================
 
+def is_admin(user_id: int) -> bool:
+    """Foydalanuvchi admin ekanligini aniq tekshirish."""
+    return int(user_id) in ADMIN_IDS
+
+
 def encrypt_card(card_number: str) -> str:
     if not card_number:
         return ""
@@ -166,7 +170,7 @@ def log_admin_view_card(admin_id: int, withdrawal_id: int):
         with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(f"{iso_time} | ADMIN_ID:{admin_id} | WITHDRAWAL_ID:{withdrawal_id}\n")
     except Exception as e:
-        logger.error(f"Audit log yozishda xatolik: {e}")
+        logger.error(f"Audit log xatosi: {e}")
 
 
 def fmt_sum(val: Any) -> str:
@@ -1219,7 +1223,7 @@ def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=t(lang, "menu_top")), KeyboardButton(text=t(lang, "menu_group"))],
         [KeyboardButton(text=t(lang, "menu_sos"))],
     ]
-    if uid in ADMIN_IDS:
+    if is_admin(uid):
         buttons.append([KeyboardButton(text=t(lang, "menu_admin"))])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
@@ -1370,11 +1374,11 @@ async def get_lang(uid: int) -> str:
 @router.message(Command("id"))
 async def cmd_my_id(message: Message):
     uid = message.from_user.id
-    is_adm = "✅ Admin" if uid in ADMIN_IDS else "❌ Oddiy foydalanuvchi"
+    status_str = "✅ Admin" if is_admin(uid) else "❌ Oddiy foydalanuvchi"
     await message.answer(
         f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
-        f"👑 <b>Status:</b> {is_adm}\n\n"
-        f"<i>Agar admin bo'lsangiz va tugma chiqmayotgan bo'lsa, Render'dagi <code>ADMIN_IDS</code> ga ushbu ID ni kiriting.</i>"
+        f"👑 <b>Status:</b> {status_str}\n\n"
+        f"<i>Yuklangan barcha Admin IDlar:</i> <code>{list(ADMIN_IDS)}</code>"
     )
 
 
@@ -1382,10 +1386,10 @@ async def cmd_my_id(message: Message):
 @router.message(Command("admin"))
 async def cmd_direct_admin(message: Message, state: FSMContext):
     uid = message.from_user.id
-    if uid not in ADMIN_IDS:
+    if not is_admin(uid):
         await message.answer(
             f"❌ <b>Siz admin emassiz!</b>\n\nSizning Telegram ID: <code>{uid}</code>\n"
-            f"Ushbu ID ni Render'dagi <code>ADMIN_IDS</code> o'zgaruvchisiga kiriting."
+            f"Ushbu ID ni Render'dagi <code>ADMIN_IDS</code> o'zgaruvchisiga qo'shing."
         )
         return
     await state.clear()
@@ -1908,7 +1912,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
 @admin_router.callback_query(F.data.startswith("adm_pay:"))
 async def admin_approve_payout(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!", show_alert=True)
         return
 
@@ -1954,7 +1958,7 @@ async def admin_approve_payout(callback: CallbackQuery):
 
 @admin_router.callback_query(F.data.startswith("adm_rej:"))
 async def admin_reject_payout(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!", show_alert=True)
         return
 
@@ -2194,7 +2198,7 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]), StateFilter("*"))
 async def admin_open(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     await state.clear()
     lang = await get_lang(message.from_user.id)
@@ -2203,7 +2207,7 @@ async def admin_open(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(F.text.in_(["📊 Statistika", "📊 Статистика"]))
 async def admin_stats_handler(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     stats = await db_get_stats()
     tot_u = stats.get("total_users", 0)
@@ -2231,7 +2235,7 @@ async def admin_stats_handler(message: Message) -> None:
 
 @admin_router.message(F.text.in_(["📥 Excel Hisobot", "📥 Excel Отчет"]))
 async def admin_export_excel(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     status_msg = await message.answer("⏳ <i>Excel hisoboti tayyorlanmoqda...</i>")
     try:
@@ -2262,7 +2266,7 @@ async def admin_export_excel(message: Message) -> None:
 
 @admin_router.message(F.text.in_(["🔄 Yandex Sinxronlash", "🔄 Синхронизация Яндекс"]))
 async def admin_sync_all_drivers(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar tekshirilmoqda...</i>")
     
@@ -2324,7 +2328,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
 
 @admin_router.message(F.text.in_(["👥 Haydovchilar", "👥 Водители"]))
 async def admin_list_drivers(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     drivers = await db_get_all_registered_drivers()
     if not drivers:
@@ -2356,7 +2360,7 @@ async def admin_list_drivers(message: Message) -> None:
 
 @admin_router.message(F.text.in_(["🗑 Haydovchini o'chirish", "🗑 Удалить водителя"]), StateFilter("*"))
 async def admin_delete_driver_prompt(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     await state.set_state(AdminDeleteDriverStates.waiting_for_query)
     lang = await get_lang(message.from_user.id)
@@ -2371,7 +2375,7 @@ async def admin_delete_driver_prompt(message: Message, state: FSMContext) -> Non
 
 @admin_router.message(AdminDeleteDriverStates.waiting_for_query)
 async def admin_delete_driver_find(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     lang = await get_lang(message.from_user.id)
     if message.text in CANCEL_TEXTS:
@@ -2415,7 +2419,7 @@ async def admin_delete_driver_find(message: Message, state: FSMContext) -> None:
 
 @admin_router.callback_query(F.data.startswith("del_confirm:"))
 async def admin_delete_driver_confirm(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+    if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!", show_alert=True)
         return
 
@@ -2436,7 +2440,7 @@ async def admin_delete_driver_cancel(callback: CallbackQuery):
 
 @admin_router.message(F.text.in_(["📢 Xabar tarqatish", "📢 Рассылка"]))
 async def admin_broadcast_prompt(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     await state.set_state(AdminBroadcastStates.waiting_for_message)
     lang = await get_lang(message.from_user.id)
@@ -2445,7 +2449,7 @@ async def admin_broadcast_prompt(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(AdminBroadcastStates.waiting_for_message)
 async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     lang = await get_lang(message.from_user.id)
     if message.text in CANCEL_TEXTS:
@@ -2471,7 +2475,7 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
 
 @admin_router.message(F.text.in_(["🚫 Nofaollar", "🚫 Неактивные"]))
 async def admin_inactive_drivers(message: Message) -> None:
-    if message.from_user.id not in ADMIN_IDS:
+    if not is_admin(message.from_user.id):
         return
     ten_days_ago = (datetime.now(TASHKENT_TZ) - timedelta(days=10)).isoformat()
     if db_pool:
