@@ -73,11 +73,14 @@ if _env_admins:
             ADMIN_IDS.add(int(_adm_clean))
 
 MANAGER_TG_ID = int(os.getenv("MANAGER_TG_ID", "0"))
+if MANAGER_TG_ID > 0:
+    ADMIN_IDS.add(MANAGER_TG_ID)
+
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
-# ENCRYPTION_KEY — Avtomatik yaratiladi, hech qachon RuntimeError bermaydi!
+# ENCRYPTION_KEY — Avtomatik xavfsiz kalit
 raw_key = os.getenv("ENCRYPTION_KEY", "").strip()
 if not raw_key or len(raw_key) < 16:
     raw_key = hashlib.sha256((BOT_TOKEN or "LOCHIN_TAXI_DEFAULT_SALT_2026").encode()).hexdigest()
@@ -111,7 +114,7 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Moliyaviy parametrlar (Faqat butun so'm — INTEGER)
+# Moliyaviy parametrlar (INTEGER)
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
 MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "0.0"))
@@ -129,7 +132,6 @@ UZ_MONTHS = {
 # ============================================================
 
 def encrypt_card(card_number: str) -> str:
-    """Karta raqamini bazaga saqlashdan oldin shifrlaydi."""
     if not card_number:
         return ""
     clean = re.sub(r"\D", "", str(card_number))
@@ -140,7 +142,6 @@ def encrypt_card(card_number: str) -> str:
 
 
 def decrypt_card(encrypted_card: str) -> str:
-    """Bazadagi shifrlangan kartani asl 16 talik raqamiga qaytaradi."""
     if not encrypted_card:
         return ""
     try:
@@ -150,7 +151,6 @@ def decrypt_card(encrypted_card: str) -> str:
 
 
 def mask_card(card_number: str) -> str:
-    """Kartani 8600 **** **** 1234 ko'rinishida xavfsiz maskalaydi."""
     clean = re.sub(r"\D", "", str(card_number))
     if len(clean) == 16:
         return f"{clean[:4]} **** **** {clean[-4:]}"
@@ -160,7 +160,6 @@ def mask_card(card_number: str) -> str:
 
 
 def log_admin_view_card(admin_id: int, withdrawal_id: int):
-    """Admin to'liq kartani ko'rganda audit log fayliga yozadi."""
     iso_time = tashkent_now_iso()
     logger.info(f"AUDIT | ADMIN {admin_id} viewed full card for withdrawal_id={withdrawal_id}")
     try:
@@ -171,7 +170,6 @@ def log_admin_view_card(admin_id: int, withdrawal_id: int):
 
 
 def fmt_sum(val: Any) -> str:
-    """Faqat butun so'm formatida ajratib ko'rsatish."""
     try:
         if val is None:
             return "0"
@@ -181,7 +179,6 @@ def fmt_sum(val: Any) -> str:
 
 
 def clean_phone_number(raw_phone: str) -> str:
-    """Telefon raqamni qat'iy +998XXXXXXXXX formatga keltiradi."""
     digits = re.sub(r"\D", "", str(raw_phone or ""))
     if digits.startswith("8") and len(digits) == 11:
         digits = "998" + digits[1:]
@@ -200,7 +197,7 @@ def tashkent_now_iso() -> str:
 
 
 # ============================================================
-# 3. DATABASE LAYER (FOR UPDATE LOCKING & ATOMIK TRANSACTIONS)
+# 3. DATABASE LAYER
 # ============================================================
 
 db_pool: Optional[asyncpg.Pool] = None
@@ -1369,6 +1366,33 @@ async def get_lang(uid: int) -> str:
     return user.get("language", "uz") if user else "uz"
 
 
+# Qulaylik uchun /id komandasi
+@router.message(Command("id"))
+async def cmd_my_id(message: Message):
+    uid = message.from_user.id
+    is_adm = "✅ Admin" if uid in ADMIN_IDS else "❌ Oddiy foydalanuvchi"
+    await message.answer(
+        f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
+        f"👑 <b>Status:</b> {is_adm}\n\n"
+        f"<i>Agar admin bo'lsangiz va tugma chiqmayotgan bo'lsa, Render'dagi <code>ADMIN_IDS</code> ga ushbu ID ni kiriting.</i>"
+    )
+
+
+# To'g'ridan-to'g'ri /admin buyrug'i
+@router.message(Command("admin"))
+async def cmd_direct_admin(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    if uid not in ADMIN_IDS:
+        await message.answer(
+            f"❌ <b>Siz admin emassiz!</b>\n\nSizning Telegram ID: <code>{uid}</code>\n"
+            f"Ushbu ID ni Render'dagi <code>ADMIN_IDS</code> o'zgaruvchisiga kiriting."
+        )
+        return
+    await state.clear()
+    lang = await get_lang(uid)
+    await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
+
+
 @router.message(Command("cancel"), StateFilter("*"))
 @router.message(F.text.in_(CANCEL_TEXTS), StateFilter("*"))
 async def global_cancel_handler(message: Message, state: FSMContext) -> None:
@@ -2489,11 +2513,11 @@ async def back_to_user_menu(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# 17. AVTOMATIK SCHEDULERLAR: ERTALABKI ESLATMA, FON SINXRON VA OYLIK
+# 17. AVTOMATIK SCHEDULERLAR
 # ============================================================
 
 async def daily_morning_reminder():
-    """Har kuni ertalab soat 08:00 da barcha ro'yxatdan o'tgan haydovchilarga eslatma yuboradi."""
+    """Har kuni ertalab soat 08:00 da barcha haydovchilarga eslatma yuboradi."""
     last_sent_day = -1
     while True:
         try:
@@ -2625,7 +2649,6 @@ async def main() -> None:
     
     await start_web_server()
     
-    # Avtomatik fon jarayonlari (Sinxronizatsiya, Ertalabki eslatma, Oylik hisobot)
     asyncio.create_task(yandex_auto_sync_scheduler())
     asyncio.create_task(daily_morning_reminder())
     asyncio.create_task(monthly_report_scheduler())
