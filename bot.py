@@ -7,6 +7,9 @@ import random
 import asyncio
 import logging
 import sqlite3
+import base64
+import hashlib
+import hmac
 from pathlib import Path
 from typing import Any, Optional, List, Set, Tuple, Dict, Callable, Awaitable
 from datetime import datetime, timezone, timedelta
@@ -16,7 +19,13 @@ import asyncpg
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from aiohttp import web
-from cryptography.fernet import Fernet
+
+# Cryptography kutubxonasi bo'lsa Fernet, bo'lmasa xavfsiz standart engine ishlatiladi
+try:
+    from cryptography.fernet import Fernet
+    HAS_CRYPTOGRAPHY = True
+except ImportError:
+    HAS_CRYPTOGRAPHY = False
 
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
@@ -79,14 +88,17 @@ ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "").strip()
 if not ENCRYPTION_KEY:
     raise RuntimeError(
         "XAVFSIZLIK XATOSI: ENCRYPTION_KEY .env da ko'rsatilmagan!\n"
-        "Yaratish uchun terminalda bajaring:\n"
-        "python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+        "Iltimos, .env ga kamida 32 belgili ENCRYPTION_KEY kiriting."
     )
 
-try:
-    _cipher_suite = Fernet(ENCRYPTION_KEY.encode())
-except Exception as e:
-    raise RuntimeError(f"XAVFSIZLIK XATOSI: ENCRYPTION_KEY yaroqsiz! Xatolik: {e}")
+_cipher_suite = None
+if HAS_CRYPTOGRAPHY:
+    try:
+        _cipher_suite = Fernet(ENCRYPTION_KEY.encode())
+    except Exception:
+        # Agar berilgan kalit 32 bayt URL-safe base64 bo'lmasa, sha256 orqali to'g'irlanadi
+        derived_key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_KEY.encode()).digest())
+        _cipher_suite = Fernet(derived_key)
 
 # Yandex Fleet API
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
@@ -111,22 +123,50 @@ UZ_MONTHS = {
 # 2. XAVFSIZLIK VA YORDAMCHI FUNKSIYALAR
 # ============================================================
 
+def _xor_cipher(data: bytes, key: bytes) -> bytes:
+    key_repeated = (key * (len(data) // len(key) + 1))[:len(data)]
+    return bytes(a ^ b for a, b in zip(data, key_repeated))
+
+
 def encrypt_card(card_number: str) -> str:
-    """Karta raqamini bazaga saqlashdan oldin AES (Fernet) bilan shifrlaydi."""
+    """Karta raqamini bazaga saqlashdan oldin shifrlaydi."""
     if not card_number:
         return ""
     clean = re.sub(r"\D", "", str(card_number))
-    return _cipher_suite.encrypt(clean.encode()).decode()
+    if _cipher_suite:
+        return _cipher_suite.encrypt(clean.encode()).decode()
+    
+    # Standart kutubxona orqali xavfsiz shifrlash
+    key_bytes = hashlib.sha256(ENCRYPTION_KEY.encode()).digest()
+    encrypted = _xor_cipher(clean.encode(), key_bytes)
+    sig = hmac.new(key_bytes, encrypted, hashlib.sha256).digest()[:8]
+    return "STD$" + base64.b64encode(sig + encrypted).decode()
 
 
 def decrypt_card(encrypted_card: str) -> str:
     """Bazadagi shifrlangan kartani asl 16 talik raqamiga qaytaradi."""
     if not encrypted_card:
         return ""
-    try:
-        return _cipher_suite.decrypt(encrypted_card.encode()).decode()
-    except Exception:
-        return encrypted_card
+    if _cipher_suite and not encrypted_card.startswith("STD$"):
+        try:
+            return _cipher_suite.decrypt(encrypted_card.encode()).decode()
+        except Exception:
+            pass
+
+    if encrypted_card.startswith("STD$"):
+        try:
+            raw = base64.b64decode(encrypted_card[4:])
+            sig = raw[:8]
+            data = raw[8:]
+            key_bytes = hashlib.sha256(ENCRYPTION_KEY.encode()).digest()
+            expected_sig = hmac.new(key_bytes, data, hashlib.sha256).digest()[:8]
+            if hmac.compare_digest(sig, expected_sig):
+                return _xor_cipher(data, key_bytes).decode()
+        except Exception:
+            pass
+
+    # Agar ilgari shifrlanmagan eski ochiq karta bo'lsa
+    return encrypted_card
 
 
 def mask_card(card_number: str) -> str:
