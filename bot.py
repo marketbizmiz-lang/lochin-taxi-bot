@@ -131,7 +131,6 @@ UZ_MONTHS = {
 # ============================================================
 
 def is_admin(user_id: int) -> bool:
-    """Foydalanuvchi admin ekanligini aniq tekshirish."""
     return int(user_id) in ADMIN_IDS
 
 
@@ -758,7 +757,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# 4. YANDEX FLEET API
+# 4. YANDEX FLEET API (ANIQ HAYDOVCHI VA PARK FILTRLARI)
 # ============================================================
 
 class YandexFleetAPI:
@@ -944,30 +943,37 @@ class YandexFleetAPI:
             logger.error(f"Yandex get_driver_balance xatosi: {e}")
         return None
 
-    async def get_today_orders_stats(self, yandex_driver_id: str) -> dict:
+    async def get_today_orders_stats(self, yandex_driver_id: Optional[str] = None) -> dict:
+        """
+        Agar yandex_driver_id berilsa — FAQAT o'sha haydovchining buyurtmalari.
+        Agar None bo'lsa — BUTUN TAKSOPARK bo'yicha umumiy buyurtmalar.
+        """
         default_res = {
             "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0,
             "total_earnings": 0, "cash_earnings": 0, "card_earnings": 0, "park_comm": 0
         }
-        if not self._is_configured() or not yandex_driver_id:
+        if not self._is_configured():
             return default_res
 
         now_tashkent = datetime.now(TASHKENT_TZ)
         today_start = now_tashkent.replace(hour=0, minute=0, second=0, microsecond=0)
 
         url = f"{self.FLEET_BASE}/v1/parks/orders/list"
+        park_query: Dict[str, Any] = {
+            "id": self.park_id,
+            "order": {
+                "booked_at": {
+                    "from": today_start.isoformat(),
+                    "to": now_tashkent.isoformat()
+                }
+            }
+        }
+        if yandex_driver_id:
+            park_query["driver_profile"] = {"id": [yandex_driver_id]}
+
         payload = {
             "query": {
-                "park": {
-                    "id": self.park_id,
-                    "order": {
-                        "booked_at": {
-                            "from": today_start.isoformat(),
-                            "to": now_tashkent.isoformat()
-                        },
-                        "driver_profile_id": yandex_driver_id
-                    }
-                }
+                "park": park_query
             },
             "limit": 500
         }
@@ -980,22 +986,36 @@ class YandexFleetAPI:
                     orders = data.get("orders", [])
                     comp = canc = 0
                     total_sum = cash_sum = card_sum = 0
+                    
                     for o in orders:
+                        # Qat'iy mijoz-haydovchi tekshiruvi (Boshqalarning zakazi kirmasligi uchun)
+                        if yandex_driver_id:
+                            o_drv_id = o.get("driver_profile_id") or o.get("performer", {}).get("driver_profile_id") or ""
+                            if o_drv_id and o_drv_id != yandex_driver_id:
+                                continue
+
                         st = o.get("status", "").lower()
-                        cost = int(float(o.get("cost", 0) or 0))
-                        pay_type = o.get("payment_method", "card").lower()
-                        if st == "complete":
+                        raw_cost = o.get("cost") or o.get("price") or o.get("total_cost") or 0
+                        try:
+                            cost = int(float(raw_cost))
+                        except Exception:
+                            cost = 0
+                        
+                        pay_type = str(o.get("payment_method", "card")).lower()
+                        
+                        if st in ("complete", "finished"):
                             comp += 1
                             total_sum += cost
-                            if "cash" in pay_type:
+                            if "cash" in pay_type or "naqd" in pay_type:
                                 cash_sum += cost
                             else:
                                 card_sum += cost
-                        elif st in ("cancelled", "canceled"):
+                        elif st in ("cancelled", "canceled", "rejected"):
                             canc += 1
+                            
                     comm = int(total_sum * (COMMISSION_PERCENT / 100.0))
                     return {
-                        "total_orders": len(orders),
+                        "total_orders": comp + canc,
                         "completed_orders": comp,
                         "cancelled_orders": canc,
                         "total_earnings": total_sum,
@@ -1277,13 +1297,14 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
     is_uz = lang == "uz"
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="📊 Statistika" if is_uz else "📊 Статистика"),
-         KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет")],
-        [KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация Яндекс"),
-         KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка")],
-        [KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители"),
-         KeyboardButton(text="🗑 Haydovchini o'chirish" if is_uz else "🗑 Удалить водителя")],
-        [KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные"),
-         KeyboardButton(text="⬅️ Asosiy menyu" if is_uz else "⬅️ Главное меню")],
+         KeyboardButton(text="🚖 Bugungi Park Zakazlari" if is_uz else "🚖 Заказы парка за сегодня")],
+        [KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет"),
+         KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация Яндекс")],
+        [KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка"),
+         KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители")],
+        [KeyboardButton(text="🗑 Haydovchini o'chirish" if is_uz else "🗑 Удалить водителя"),
+         KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные")],
+        [KeyboardButton(text="⬅️ Asosiy menyu" if is_uz else "⬅️ Главное меню")],
     ], resize_keyboard=True)
 
 
@@ -1691,7 +1712,7 @@ async def balance_handler(message: Message) -> None:
 
 
 # ============================================================
-# 12. BUGUNGI BUYURTMALAR (REAL-TIME YANDEX)
+# 12. BUGUNGI BUYURTMALAR (FAQAT SHU HAYDOVCHINING O'ZI UCHUN)
 # ============================================================
 
 @router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы"]))
@@ -1703,10 +1724,10 @@ async def orders_handler(message: Message) -> None:
         return
 
     lang = user.get("language", "uz")
-    wait_msg = await message.answer("⏳ <i>Yandex Pro dan bugungi buyurtmalar olinmoqda...</i>")
+    wait_msg = await message.answer("⏳ <i>Yandex Pro dan shaxsiy buyurtmalaringiz olinmoqda...</i>")
 
     y_id = user.get("yandex_driver_id")
-    stats = await yandex_api.get_today_orders_stats(y_id) if y_id else {
+    stats = await yandex_api.get_today_orders_stats(yandex_driver_id=y_id) if y_id else {
         "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0,
         "total_earnings": 0, "cash_earnings": 0, "card_earnings": 0, "park_comm": 0
     }
@@ -1725,14 +1746,14 @@ async def orders_handler(message: Message) -> None:
     p_comm = fmt_sum(stats.get("park_comm", 0))
 
     text = (
-        f"📊 <b>Bugungi Buyurtmalar Statistikasi:</b>\n"
+        f"📊 <b>Sizning Bugungi Shaxsiy Buyurtmalaringiz:</b>\n"
         f"📅 <i>{now_tashkent.strftime('%d.%m.%Y | %H:%M')} holatiga</i>\n\n"
-        f"🚕 <b>Jami buyurtmalar:</b> <b>{t_orders} ta</b>\n"
+        f"🚕 <b>Jami bajargan buyurtmalaringiz:</b> <b>{t_orders} ta</b>\n"
         f"  └ ✅ Tugallangan: <b>{c_orders} ta</b>\n"
         f"  └ ❌ Bekor qilingan: <b>{x_orders} ta</b>\n\n"
-        f"💰 <b>Bugungi jami daromad:</b> <b>{t_earn} so'm</b>\n"
-        f"  └ 💳 Karta orqali: <b>{cd_earn} so'm</b>\n"
-        f"  └ 💵 Naqd orqali: <b>{cs_earn} so'm</b>\n"
+        f"💰 <b>Bugungi shaxsiy daromadingiz:</b> <b>{t_earn} so'm</b>\n"
+        f"  └ 💳 Karta orqali tushum: <b>{cd_earn} so'm</b>\n"
+        f"  └ 💵 Naqd orqali tushum: <b>{cs_earn} so'm</b>\n"
         f"📈 <b>Taksopark komissiyasi:</b> {p_comm} so'm\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"🔥 <i>Buyurtmalarni faol bajaring va haftalik TOP mukofotlarga ega bo'ling!</i>"
@@ -1741,7 +1762,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 13. PUL YECHISH (1 TA PENDING ARIZA CHEKLOVI)
+# 13. PUL YECHISH
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -2205,6 +2226,41 @@ async def admin_open(message: Message, state: FSMContext) -> None:
     await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
 
 
+@admin_router.message(F.text.in_(["🚖 Bugungi Park Zakazlari", "🚖 Заказы парка за сегодня"]))
+async def admin_park_today_orders(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    status_msg = await message.answer("⏳ <i>Yandex Pro dan taksopark bo'yicha umumiy zakazlar olinmoqda...</i>")
+    
+    # yandex_driver_id=None -> Butun taksopark bo'yicha umumiy statistika
+    stats = await yandex_api.get_today_orders_stats(yandex_driver_id=None)
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    now_tashkent = datetime.now(TASHKENT_TZ)
+    t_orders = stats.get("total_orders", 0)
+    c_orders = stats.get("completed_orders", 0)
+    x_orders = stats.get("cancelled_orders", 0)
+    t_earn = fmt_sum(stats.get("total_earnings", 0))
+    cd_earn = fmt_sum(stats.get("card_earnings", 0))
+    cs_earn = fmt_sum(stats.get("cash_earnings", 0))
+    p_comm = fmt_sum(stats.get("park_comm", 0))
+
+    await message.answer(
+        f"🚖 <b>Bugungi Butun Taksopark Bo'yicha Umumiy Buyurtmalar:</b>\n"
+        f"📅 <i>{now_tashkent.strftime('%d.%m.%Y | %H:%M')} holatiga (Real vaqt)</i>\n\n"
+        f"🚕 <b>Jami tushgan zakazlar:</b> <b>{t_orders} ta</b>\n"
+        f"  └ ✅ Tugallangan zakazlar: <b>{c_orders} ta</b>\n"
+        f"  └ ❌ Bekor qilingan: <b>{x_orders} ta</b>\n\n"
+        f"💰 <b>Bugungi park umumiy aylanmasi:</b> <b>{t_earn} so'm</b>\n"
+        f"  └ 💳 Karta orqali aylanma: <b>{cd_earn} so'm</b>\n"
+        f"  └ 💵 Naqd orqali aylanma: <b>{cs_earn} so'm</b>\n"
+        f"📈 <b>Taksopark komissiyasi tushumi:</b> <b>{p_comm} so'm</b>"
+    )
+
+
 @admin_router.message(F.text.in_(["📊 Statistika", "📊 Статистика"]))
 async def admin_stats_handler(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -2222,7 +2278,7 @@ async def admin_stats_handler(message: Message) -> None:
 
     await message.answer(
         f"📊 <b>{BOT_NAME} — To'liq Tizim Statistikasi:</b>\n\n"
-        f"👥 Jami foydalanuvchilar: <b>{tot_u} ta</b>\n"
+        f"👥 Jami bot foydalanuvchilari: <b>{tot_u} ta</b>\n"
         f"🚕 Ro'yxatdan o'tgan haydovchilar: <b>{reg_d} ta</b>\n"
         f"🔗 Yandex Pro ulangan: <b>{y_lnk} ta</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
