@@ -63,7 +63,26 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BOT_NAME = os.getenv("BOT_NAME", "LOCHIN TAXI").strip() or "LOCHIN TAXI"
 PORT = int(os.getenv("PORT", "8080"))
 
-# ADMIN_IDS — Qavs, qo'shtirnoq, probellardan to'liq tozalangan xatosiz parsing
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
+SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
+DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
+
+def clean_phone_number(raw_phone: str) -> str:
+    digits = re.sub(r"\D", "", str(raw_phone or ""))
+    if digits.startswith("8") and len(digits) == 11:
+        digits = "998" + digits[1:]
+    elif not digits.startswith("998") and len(digits) == 9:
+        digits = "998" + digits
+    elif digits.startswith("998") and len(digits) == 12:
+        pass
+    else:
+        if len(digits) >= 9:
+            digits = "998" + digits[-9:]
+    return f"+{digits}"
+
+OWNER_PHONE = clean_phone_number(SUPPORT_PHONE)
+
+# ADMIN_IDS — Barcha manbalardan yig'iladi
 ADMIN_IDS: Set[int] = set()
 _raw_admins = str(os.getenv("ADMIN_IDS", "")) + " " + str(os.getenv("ADMIN_ID", ""))
 for _adm_str in re.findall(r"\d+", _raw_admins):
@@ -72,12 +91,6 @@ for _adm_str in re.findall(r"\d+", _raw_admins):
 MANAGER_TG_ID = int(os.getenv("MANAGER_TG_ID", "0") if os.getenv("MANAGER_TG_ID", "0").isdigit() else 0)
 if MANAGER_TG_ID > 0:
     ADMIN_IDS.add(MANAGER_TG_ID)
-
-logger.info(f"Muvaffaqiyatli yuklangan ADMIN_IDS: {ADMIN_IDS}")
-
-SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
-SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
-DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
 # ENCRYPTION_KEY — Avtomatik himoyalangan kalit (Crash bermaydi)
 raw_key = os.getenv("ENCRYPTION_KEY", "").strip()
@@ -181,20 +194,6 @@ def fmt_sum(val: Any) -> str:
         return "0"
 
 
-def clean_phone_number(raw_phone: str) -> str:
-    digits = re.sub(r"\D", "", str(raw_phone or ""))
-    if digits.startswith("8") and len(digits) == 11:
-        digits = "998" + digits[1:]
-    elif not digits.startswith("998") and len(digits) == 9:
-        digits = "998" + digits
-    elif digits.startswith("998") and len(digits) == 12:
-        pass
-    else:
-        if len(digits) >= 9:
-            digits = "998" + digits[-9:]
-    return f"+{digits}"
-
-
 def tashkent_now_iso() -> str:
     return datetime.now(TASHKENT_TZ).replace(microsecond=0).isoformat()
 
@@ -261,6 +260,13 @@ async def init_database():
                     CREATE INDEX IF NOT EXISTS idx_wd_status ON withdrawals(status);
                     CREATE INDEX IF NOT EXISTS idx_wd_created ON withdrawals(created_at);
                 """)
+                
+                # Egasining raqamini avtomatik Admin deb belgilash
+                owner_tg = await conn.fetchval("SELECT telegram_id FROM users WHERE phone = $1", OWNER_PHONE)
+                if owner_tg:
+                    ADMIN_IDS.add(int(owner_tg))
+                    logger.info(f"Bosh Admin (Ega) aniqlandi va qo'shildi: Telegram ID={owner_tg}")
+                    
             logger.info("PostgreSQL (asyncpg) muvaffaqiyatli ishga tushdi!")
         except Exception as e:
             logger.error(f"PostgreSQL ulanishida xatolik: {e}. SQLite WAL rejimiga o'tilmoqda.")
@@ -317,6 +323,13 @@ async def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wd_user ON withdrawals(user_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_wd_status ON withdrawals(status);")
         conn.commit()
+        
+        # SQLite'dan Egasining raqamini avtomatik Admin deb belgilash
+        row = conn.execute("SELECT telegram_id FROM users WHERE phone = ?", (OWNER_PHONE,)).fetchone()
+        if row:
+            ADMIN_IDS.add(int(row[0]))
+            logger.info(f"Bosh Admin (Ega) aniqlandi va qo'shildi: Telegram ID={row[0]}")
+            
         conn.close()
         logger.info("SQLite (WAL High Speed Mode) tayyor!")
 
@@ -329,6 +342,11 @@ def _process_user_dict(d: Optional[dict]) -> Optional[dict]:
         res["card_number"] = decrypt_card(res["card_number"])
     if "balance" in res:
         res["balance"] = int(res["balance"] or 0)
+    
+    # Agar telefon raqami taksopark egasiga tegishli bo'lsa, uni avtomatik Admin qilib qo'shish
+    if res.get("phone") and clean_phone_number(res["phone"]) == OWNER_PHONE:
+        ADMIN_IDS.add(int(res["telegram_id"]))
+
     return res
 
 
@@ -497,6 +515,9 @@ async def db_finish_registration(
     now = tashkent_now_iso()
     enc_card = encrypt_card(card_number)
     phone_clean = clean_phone_number(phone)
+
+    if phone_clean == OWNER_PHONE:
+        ADMIN_IDS.add(telegram_id)
 
     if db_pool:
         async with db_pool.acquire() as conn:
@@ -757,7 +778,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (ANIQ HAYDOVCHI VA PARK FILTRLARI)
+# 4. YANDEX FLEET API (ANIQ FILTRLAR BILAN)
 # ============================================================
 
 class YandexFleetAPI:
@@ -944,10 +965,6 @@ class YandexFleetAPI:
         return None
 
     async def get_today_orders_stats(self, yandex_driver_id: Optional[str] = None) -> dict:
-        """
-        Agar yandex_driver_id berilsa — FAQAT o'sha haydovchining buyurtmalari.
-        Agar None bo'lsa — BUTUN TAKSOPARK bo'yicha umumiy buyurtmalar.
-        """
         default_res = {
             "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0,
             "total_earnings": 0, "cash_earnings": 0, "card_earnings": 0, "park_comm": 0
@@ -988,7 +1005,6 @@ class YandexFleetAPI:
                     total_sum = cash_sum = card_sum = 0
                     
                     for o in orders:
-                        # Qat'iy mijoz-haydovchi tekshiruvi (Boshqalarning zakazi kirmasligi uchun)
                         if yandex_driver_id:
                             o_drv_id = o.get("driver_profile_id") or o.get("performer", {}).get("driver_profile_id") or ""
                             if o_drv_id and o_drv_id != yandex_driver_id:
@@ -1395,6 +1411,7 @@ async def get_lang(uid: int) -> str:
 @router.message(Command("id"))
 async def cmd_my_id(message: Message):
     uid = message.from_user.id
+    user = await db_get_user(uid)
     status_str = "✅ Admin" if is_admin(uid) else "❌ Oddiy foydalanuvchi"
     await message.answer(
         f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
@@ -1407,6 +1424,7 @@ async def cmd_my_id(message: Message):
 @router.message(Command("admin"))
 async def cmd_direct_admin(message: Message, state: FSMContext):
     uid = message.from_user.id
+    user = await db_get_user(uid)
     if not is_admin(uid):
         await message.answer(
             f"❌ <b>Siz admin emassiz!</b>\n\nSizning Telegram ID: <code>{uid}</code>\n"
@@ -1423,8 +1441,8 @@ async def cmd_direct_admin(message: Message, state: FSMContext):
 async def global_cancel_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     uid = message.from_user.id
-    lang = await get_lang(uid)
     user = await db_get_user(uid)
+    lang = user.get("language", "uz") if user else "uz"
     kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else register_reply_kb(lang)
     await message.answer(t(lang, "action_cancelled"), reply_markup=kb)
 
@@ -2043,8 +2061,25 @@ async def profile_handler(message: Message) -> None:
         f"🚕 Yandex: <b>{y_val}</b>\n"
         f"🌐 Til: <b>{lang_display}</b>"
     )
-    btn_txt = "🌐 Tilni o'zgartirish" if lang == "uz" else "🌐 Сменить язык"
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_txt, callback_data="change_lang_menu")]]))
+    
+    inline_rows = [
+        [InlineKeyboardButton(text="🌐 Tilni o'zgartirish" if lang == "uz" else "🌐 Сменить язык", callback_data="change_lang_menu")]
+    ]
+    if is_admin(uid):
+        inline_rows.append([InlineKeyboardButton(text="🛠 Admin Panelga o'tish", callback_data="open_admin_panel_cb")])
+
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_rows))
+
+
+@router.callback_query(F.data == "open_admin_panel_cb")
+async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!", show_alert=True)
+        return
+    await state.clear()
+    lang = await get_lang(callback.from_user.id)
+    await callback.message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
+    await callback.answer()
 
 
 @router.callback_query(F.data == "change_lang_menu")
