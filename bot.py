@@ -18,7 +18,13 @@ import asyncpg
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from aiohttp import web
-from cryptography.fernet import Fernet
+
+# Cryptography xavfsiz import (Serverda kutubxona bo'lmasa o'rnatish talabi bilan toza ogohlantirish)
+try:
+    from cryptography.fernet import Fernet
+    HAS_FERNET = True
+except ImportError:
+    HAS_FERNET = False
 
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
@@ -60,7 +66,7 @@ if not BOT_TOKEN:
 BOT_NAME = os.getenv("BOT_NAME", "LOCHIN TAXI").strip() or "LOCHIN TAXI"
 PORT = int(os.getenv("PORT", "8080"))
 
-# ADMIN_IDS — Faqat .env orqali olinadi (Kodda harakod ID yo'q)
+# ADMIN_IDS — Faqat .env orqali olinadi
 ADMIN_IDS: Set[int] = set()
 _env_admins = os.getenv("ADMIN_IDS", "").strip()
 if _env_admins:
@@ -77,7 +83,7 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
-# 1-KUNGI XAVFSIZLIK: Qat'iy Fernet ENCRYPTION_KEY tekshiruvi (32+ belgi shart)
+# 1-KUN XAVFSIZLIK: ENCRYPTION_KEY 32+ belgi shart
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "").strip()
 if not ENCRYPTION_KEY or len(ENCRYPTION_KEY) < 32:
     raise RuntimeError(
@@ -85,11 +91,16 @@ if not ENCRYPTION_KEY or len(ENCRYPTION_KEY) < 32:
         "Yaratish uchun: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
     )
 
-try:
+_cipher_suite = None
+if HAS_FERNET:
     derived_key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_KEY.encode()).digest())
     _cipher_suite = Fernet(derived_key)
-except Exception as e:
-    raise RuntimeError(f"XAVFSIZLIK XATOSI: ENCRYPTION_KEY Fernet uchun yaroqsiz! Xato: {e}")
+else:
+    raise RuntimeError(
+        "XATOLIK: 'cryptography' kutubxonasi o'rnatilmagan!\n"
+        "Terminalda bajaring: pip install cryptography\n"
+        "Render Build Command ga qo'ying: pip install -r requirements.txt"
+    )
 
 # Yandex Fleet API
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
@@ -143,7 +154,7 @@ def mask_card(card_number: str) -> str:
 
 
 def log_admin_view_card(admin_id: int, withdrawal_id: int):
-    """Admin to'liq kartani ko'rganda ham loggerga, ham audit.log fayliga yozadi."""
+    """Admin to'liq kartani ko'rganda audit log fayliga va loggerga yozadi."""
     iso_time = tashkent_now_iso()
     logger.info(f"AUDIT | ADMIN {admin_id} viewed full card for withdrawal_id={withdrawal_id}")
     try:
@@ -154,7 +165,7 @@ def log_admin_view_card(admin_id: int, withdrawal_id: int):
 
 
 def fmt_sum(val: Any) -> str:
-    """Faqat butun so'm formatida chiroyli ajratib ko'rsatish (Float aniqligi yo'qolmaydi)."""
+    """Faqat butun so'm formatida ajratib ko'rsatish (Sof integer)."""
     try:
         if val is None:
             return "0"
@@ -183,7 +194,7 @@ def tashkent_now_iso() -> str:
 
 
 # ============================================================
-# 3. DATABASE LAYER (ROW-LOCKING "FOR UPDATE" + ACID TRANSACTIONS)
+# 3. DATABASE LAYER (FOR UPDATE LOCKING + 1 PENDING CHECK)
 # ============================================================
 
 db_pool: Optional[asyncpg.Pool] = None
@@ -526,7 +537,7 @@ async def db_update_balance(telegram_id: int, balance: int):
         conn.close()
 
 
-# 2-KUNGI XAVFSIZLIK: FOR UPDATE bilan qulflangan atomar pul yechish (Race Condition yo'q)
+# 2-KUN & 3-POLISH: FOR UPDATE + 1 TA AKTIV ARIZA CHEKLOVI
 async def db_create_withdrawal(
     user_id: int, telegram_id: int, amount: int, commission: int,
     net_amount: int, card_number: str, status: str, payout_method: str, ext_tx_id: str = "",
@@ -537,6 +548,13 @@ async def db_create_withdrawal(
     if db_pool:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
+                # 3-POLISH: Faol pending ariza tekshiruvi
+                pending = await conn.fetchval(
+                    "SELECT 1 FROM withdrawals WHERE user_id = $1 AND status = 'pending' FOR UPDATE", user_id
+                )
+                if pending:
+                    raise ValueError("Sizda allaqachon ko'rib chiqilayotgan faol ariza mavjud!")
+
                 # Qatorni qulflash (Row-Level Locking)
                 cur_bal = await conn.fetchval(
                     "SELECT balance FROM users WHERE id = $1 FOR UPDATE", user_id
@@ -563,6 +581,10 @@ async def db_create_withdrawal(
         conn = sqlite3.connect(DB_PATH, timeout=10)
         with conn:
             cur = conn.cursor()
+            cur.execute("SELECT 1 FROM withdrawals WHERE user_id = ? AND status = 'pending'", (user_id,))
+            if cur.fetchone():
+                raise ValueError("Sizda allaqachon ko'rib chiqilayotgan faol ariza mavjud!")
+
             cur.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
             row = cur.fetchone()
             if not row:
@@ -734,7 +756,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (MEMORY-LEAK PREVENTION & LIVE CACHE)
+# 4. YANDEX FLEET API (MEMORY CLEANUP & LIVE CACHE)
 # ============================================================
 
 class YandexFleetAPI:
@@ -747,8 +769,8 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 180  # 180s kesh
-        self._balance_cache: Dict[str, Tuple[int, datetime]] = {}  # 10s balans keshi
+        self._cache_ttl = 180
+        self._balance_cache: Dict[str, Tuple[int, datetime]] = {}
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -775,7 +797,6 @@ class YandexFleetAPI:
             await self._session.close()
 
     def _cleanup_balance_cache(self):
-        """3-XOTIRA: 60 sekunddan oshgan balans keshlarini xotiradan tozalaydi."""
         now = datetime.now()
         expired = [k for k, v in self._balance_cache.items() if (now - v[1]).total_seconds() > 60]
         for k in expired:
@@ -847,7 +868,6 @@ class YandexFleetAPI:
         return None
 
     def _extract_balance(self, raw_driver: dict) -> int:
-        """Balansni faqat INTEGER so'mda qaytarish."""
         accounts = raw_driver.get("accounts", [])
         if not accounts:
             return 0
@@ -889,7 +909,6 @@ class YandexFleetAPI:
         }
 
     async def get_driver_balance(self, yandex_driver_id: str) -> Optional[int]:
-        """Tirik balans: 10 sekundlik kesh bilan."""
         if not self._is_configured() or not yandex_driver_id:
             return None
 
@@ -987,7 +1006,6 @@ class YandexFleetAPI:
         return default_res
 
     async def create_transaction(self, yandex_driver_id: str, amount: int, description: str) -> bool:
-        """Yandex Pro dan pul yechish tranzaksiyasini yaratish."""
         if not self._is_configured() or not yandex_driver_id:
             return False
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/transactions"
@@ -1118,7 +1136,7 @@ async def generate_monthly_excel_report() -> bytes:
 
 
 # ============================================================
-# 6. MATNLAR VA KLAVIATURALAR
+# 6. MATNLAR VA KLAVIATURALAR (2-POLISH: MANAGER_TG_ID CHECK)
 # ============================================================
 
 TEXTS = {
@@ -1243,12 +1261,15 @@ def register_reply_kb(lang: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t(lang, "register_btn"))]], resize_keyboard=True)
 
 
+# 2-POLISH: Faqat MANAGER_TG_ID > 0 bo'lganda chat tugmasi qo'shiladi
 def sos_menu_kb(lang: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+    kb_rows = [
         [InlineKeyboardButton(text=t(lang, "sos_btn_loc"), callback_data="sos:loc")],
         [InlineKeyboardButton(text=t(lang, "sos_btn_msg"), callback_data="sos:msg")],
-        [InlineKeyboardButton(text=t(lang, "sos_btn_chat"), url=f"tg://user?id={MANAGER_TG_ID}")],
-    ])
+    ]
+    if MANAGER_TG_ID > 0:
+        kb_rows.append([InlineKeyboardButton(text=t(lang, "sos_btn_chat"), url=f"tg://user?id={MANAGER_TG_ID}")])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
 def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
@@ -1266,7 +1287,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
 
 
 # ============================================================
-# 7. ANTI-FLOOD THROTTLING (MEMORY CLEANUP BILAN)
+# 7. ANTI-FLOOD THROTTLING (PERIODIC CLEANUP)
 # ============================================================
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -1276,7 +1297,6 @@ class ThrottlingMiddleware(BaseMiddleware):
         self.last_cleanup = time.time()
 
     def _cleanup_old_entries(self, now: float):
-        """4-XOTIRA: Har 1 soatda eski flood yozuvlarini tozalaydi."""
         if now - self.last_cleanup > 3600 or len(self.user_timestamps) > 2000:
             threshold = now - 60.0
             self.user_timestamps = {uid: ts for uid, ts in self.user_timestamps.items() if ts > threshold}
@@ -1693,7 +1713,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 13. PUL YECHISH (ATOMIC DATABASE LOCKING BILAN)
+# 13. PUL YECHISH (1 TA PENDING ARIZA CHEKLOVI BILAN)
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -1826,7 +1846,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
     u_model = user.get("car_model", "")
     u_num = user.get("car_number", "")
 
-    # BIZNES TALAB: Payme/Click orqali to'lash uchun TO'LIQ 16 talik karta (Bitta bosishda nusxalash)
     admin_alert = (
         f"💸 <b>YANGI PUL YECHISH ARIZASI! (Ariza #{w_id})</b>\n\n"
         f"🆔 POSITION: <code>{u_pos}</code>\n"
@@ -1880,7 +1899,6 @@ async def admin_approve_payout(callback: CallbackQuery):
         await callback.answer("Haydovchi topilmadi!", show_alert=True)
         return
 
-    # Yandex Pro hisobidan pul yechish tranzaksiyasini yaratish
     if user.get("yandex_driver_id"):
         await yandex_api.create_transaction(
             user["yandex_driver_id"],
@@ -1946,7 +1964,7 @@ async def admin_reject_payout(callback: CallbackQuery):
 
 
 # ============================================================
-# 15. PROFIL, TOP, SOS (IOS TEXT LOCATION SUPPORT)
+# 15. PROFIL, TOP, SOS
 # ============================================================
 
 @router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
@@ -2197,11 +2215,19 @@ async def admin_export_excel(message: Message) -> None:
         now = datetime.now(TASHKENT_TZ)
         month_name = UZ_MONTHS.get(now.month, "Oy")
         now_str = now.strftime("%Y_%m_%d_%H%M")
-        file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_Hisobot_{now_str}.xlsx")
-        await message.answer_document(
-            document=file,
-            caption=f"📊 <b>{now.year}-yil {month_name} oyi Lochin Taxi hisoboti!</b>\n<i>(Kartalar xavfsiz maskalangan)</i>"
-        )
+        
+        # 1-POLISH: Har bir adminga alohida BufferedInputFile yaratiladi
+        for adm in ADMIN_IDS:
+            try:
+                file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_Hisobot_{now_str}.xlsx")
+                await bot.send_document(
+                    chat_id=adm,
+                    document=file,
+                    caption=f"📊 <b>{now.year}-yil {month_name} oyi Lochin Taxi hisoboti!</b>\n<i>(Kartalar xavfsiz maskalangan)</i>"
+                )
+            except Exception:
+                pass
+
         try:
             await status_msg.delete()
         except Exception:
@@ -2211,7 +2237,6 @@ async def admin_export_excel(message: Message) -> None:
         await status_msg.edit_text("❌ Excel yaratishda xatolik yuz berdi.")
 
 
-# 3-YANDEX: yandex_driver_id orqali aniq va xatosiz sinxronlash
 @admin_router.message(F.text.in_(["🔄 Yandex Sinxronlash", "🔄 Синхронизация Яндекс"]))
 async def admin_sync_all_drivers(message: Message) -> None:
     if message.from_user.id not in ADMIN_IDS:
@@ -2466,14 +2491,14 @@ async def back_to_user_menu(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# 17. AVTOMATIK FON SINXRONIZATSIYASI (WHERE yandex_driver_id)
+# 17. AVTOMATIK FON SINXRONIZATSIYASI & OYLIK HISOBOT (1-POLISH)
 # ============================================================
 
 async def yandex_auto_sync_scheduler():
     """Har 20 daqiqada Yandex kabinetdagi haydovchilarni tekshirib, faqat o'zgarganlarini yangilaydi."""
     while True:
         try:
-            await asyncio.sleep(1200)  # 20 minut
+            await asyncio.sleep(1200)
             drivers, _ = await yandex_api.get_all_drivers(force_refresh=True)
             if drivers:
                 now = tashkent_now_iso()
@@ -2521,9 +2546,11 @@ async def monthly_report_scheduler():
                 excel_bytes = await generate_monthly_excel_report()
                 month_name = UZ_MONTHS.get(now.month, "Oy")
                 filename = f"Lochin_Taxi_{now.year}_{month_name}.xlsx"
-                file = BufferedInputFile(excel_bytes, filename=filename)
+                
+                # 1-POLISH: Har bir adminga alohida BufferedInputFile
                 for adm in ADMIN_IDS:
                     try:
+                        file = BufferedInputFile(excel_bytes, filename=filename)
                         await bot.send_document(
                             chat_id=adm,
                             document=file,
