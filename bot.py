@@ -3,6 +3,7 @@ import re
 import io
 import time
 import json
+import random
 import asyncio
 import logging
 import sqlite3
@@ -36,7 +37,7 @@ from aiogram.types import (
 )
 
 # ============================================================
-# 1. KONFIGURATSIYA VA XAVFSIZLIK
+# 1. ASOSIY SOZLAMALAR VA XAVFSIZLIK (CONFIG & SECURITY)
 # ============================================================
 
 logging.basicConfig(
@@ -56,7 +57,7 @@ if not BOT_TOKEN:
 BOT_NAME = os.getenv("BOT_NAME", "LOCHIN TAXI").strip() or "LOCHIN TAXI"
 PORT = int(os.getenv("PORT", "8080"))
 
-# ADMIN_IDS — Faqat os.getenv() orqali olinadi (Kodda harakod yo'q)
+# ADMIN_IDS — Faqat .env orqali olinadi (Kod ichida qat'iy harakod yo'q)
 ADMIN_IDS: Set[int] = set()
 _env_admins = os.getenv("ADMIN_IDS", "").strip()
 if _env_admins:
@@ -66,14 +67,14 @@ if _env_admins:
             ADMIN_IDS.add(int(_adm_clean))
 
 if not ADMIN_IDS:
-    logger.warning("DIQQAT: .env da ADMIN_IDS kiritilmagan! Admin funksiyalari ishlamasligi mumkin.")
+    logger.warning("DIQQAT: .env faylida ADMIN_IDS ko'rsatilmagan!")
 
 MANAGER_TG_ID = int(os.getenv("MANAGER_TG_ID", "0"))
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
 DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMTUy").strip()
 
-# ENCRYPTION_KEY — Majburiy shart. Mavjud bo'lmasa bot to'xtaydi!
+# ENCRYPTION_KEY — Majburiy shart. Mavjud bo'lmasa bot ishga tushmaydi!
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "").strip()
 if not ENCRYPTION_KEY:
     raise RuntimeError(
@@ -93,7 +94,7 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Moliyaviy chegaralar (Faqat butun so'm - INTEGER)
+# Moliyaviy chegaralar (Faqat butun so'm — INTEGER)
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
 MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "0.0"))
@@ -104,6 +105,7 @@ UZ_MONTHS = {
     1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel", 5: "May", 6: "Iyun",
     7: "Iyul", 8: "Avgust", 9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr"
 }
+
 
 # ============================================================
 # 2. XAVFSIZLIK VA YORDAMCHI FUNKSIYALAR
@@ -124,7 +126,6 @@ def decrypt_card(encrypted_card: str) -> str:
     try:
         return _cipher_suite.decrypt(encrypted_card.encode()).decode()
     except Exception:
-        # Agar ilgari shifrlanmagan ochiq ma'lumot bo'lsa
         return encrypted_card
 
 
@@ -139,7 +140,7 @@ def mask_card(card_number: str) -> str:
 
 
 def log_admin_view_card(admin_id: int, withdrawal_id: int):
-    """Admin to'liq kartani ko'rganda audit logini yozadi."""
+    """Admin to'liq kartani ko'rganda xavfsizlik audit logini yozadi."""
     logger.info(f"AUDIT | ADMIN {admin_id} viewed full card for withdrawal_id={withdrawal_id}")
 
 
@@ -234,7 +235,7 @@ async def init_database():
                     CREATE INDEX IF NOT EXISTS idx_wd_status ON withdrawals(status);
                     CREATE INDEX IF NOT EXISTS idx_wd_created ON withdrawals(created_at);
                 """)
-            logger.info("PostgreSQL (asyncpg) muvaffaqiyatli ishga tushdi va jadvallar tekshirildi.")
+            logger.info("PostgreSQL (asyncpg) muvaffaqiyatli ishga tushdi!")
         except Exception as e:
             logger.error(f"PostgreSQL ulanishida xatolik: {e}. SQLite WAL rejimiga o'tilmoqda.")
             db_pool = None
@@ -381,7 +382,7 @@ async def db_find_driver_by_query(query: str) -> Optional[dict]:
 
 
 async def db_delete_user_by_id(user_id: int) -> bool:
-    """ACID Tranzaksiya bilan haydovchi va uning arizalarini o'chirish."""
+    """ACID Tranzaksiya bilan haydovchi va uning arizalarini to'liq o'chirish."""
     try:
         if db_pool:
             async with db_pool.acquire() as conn:
@@ -442,7 +443,6 @@ async def db_set_language(telegram_id: int, language: str):
 
 
 async def db_generate_unique_position() -> str:
-    import random
     for _ in range(200):
         pos = f"LCH-{random.randint(1000, 9999)}"
         if db_pool:
@@ -516,7 +516,7 @@ async def db_create_withdrawal(
     user_id: int, telegram_id: int, amount: int, commission: int,
     net_amount: int, card_number: str, status: str, payout_method: str, ext_tx_id: str = "",
 ) -> int:
-    """ACID Tranzaksiya orqali balansdan yechish va arizani kiritish."""
+    """ACID Tranzaksiya orqali balansdan ayirish va ariza yaratish."""
     now = tashkent_now_iso()
     enc_card = encrypt_card(card_number)
 
@@ -585,7 +585,7 @@ async def db_update_withdrawal_status(w_id: int, status: str, ext_tx_id: str = "
 
 
 async def db_refund_withdrawal(w_id: int):
-    """ACID Tranzaksiya bilan rad etilgan arizaning pulini haydovchiga qaytarish."""
+    """ACID Tranzaksiya bilan rad etilgan ariza pulini hisobga qaytarish."""
     wd = await db_get_withdrawal(w_id)
     if not wd or wd.get("status") in ("rejected", "completed"):
         return
@@ -699,7 +699,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (HIGH-SPEED POOL, 10S/180S CACHE, INTEGER)
+# 4. YANDEX FLEET API (REAL-TIME VA HIGH SPEED POOL)
 # ============================================================
 
 class YandexFleetAPI:
@@ -712,7 +712,7 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 180  # 180 sekundlik haydovchilar keshi
+        self._cache_ttl = 180  # 180 sekundlik kesh
         self._balance_cache: Dict[str, Tuple[int, datetime]] = {}  # 10 sekundlik balans keshi
 
     def _is_configured(self) -> bool:
@@ -805,7 +805,7 @@ class YandexFleetAPI:
         return None
 
     def _extract_balance(self, raw_driver: dict) -> int:
-        """Balansni yaxlitlangan holda faqat INTEGER so'mda qaytarish."""
+        """Balansni faqat INTEGER so'mda qaytarish."""
         accounts = raw_driver.get("accounts", [])
         if not accounts:
             return 0
@@ -847,7 +847,7 @@ class YandexFleetAPI:
         }
 
     async def get_driver_balance(self, yandex_driver_id: str) -> Optional[int]:
-        """Tirik balansni olish: 10 sekundlik kesh bilan."""
+        """Tirik balans: 10 sekundlik kesh bilan."""
         if not self._is_configured() or not yandex_driver_id:
             return None
 
@@ -944,7 +944,7 @@ class YandexFleetAPI:
         return default_res
 
     async def create_transaction(self, yandex_driver_id: str, amount: int, description: str) -> bool:
-        """Yandex Pro hisobidan pul yechish tranzaksiyasini yaratish."""
+        """Yandex Pro dan pul yechish."""
         if not self._is_configured() or not yandex_driver_id:
             return False
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/transactions"
@@ -972,7 +972,7 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 5. EXCEL HISOBOT (MASKALANGAN KARTA VA TO'LIQ STATISTIKA)
+# 5. EXCEL HISOBOT (MASKALANGAN KARTA)
 # ============================================================
 
 async def generate_monthly_excel_report() -> bytes:
@@ -1242,7 +1242,7 @@ class ThrottlingMiddleware(BaseMiddleware):
             now = time.time()
             last_time = self.user_timestamps.get(user_id, 0.0)
             if now - last_time < self.limit:
-                return  # Flood so'rovini e'tiborsiz qoldirish
+                return
             self.user_timestamps[user_id] = now
         return await handler(event, data)
 
@@ -1278,7 +1278,7 @@ class AdminDeleteDriverStates(StatesGroup):
 
 
 # ============================================================
-# 9. AIOGRAM BOT, DISPATCHER VA ROUTERLAR
+# 9. DISPATCHER VA ROUTERLAR
 # ============================================================
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -1348,7 +1348,7 @@ async def lang_callback(callback: CallbackQuery) -> None:
 
 
 # ============================================================
-# 10. RO'YXATDAN O'TISH
+# 10. RO'YXATDAN O'TISH HANDLERLARI
 # ============================================================
 
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]), StateFilter("*"))
@@ -1527,7 +1527,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
 
 
 # ============================================================
-# 11. BALANS (REAL VAQT - 10 SEKUND KESH VA MASKALANGAN KARTA)
+# 11. BALANS (10s KESH & MASKALANGAN KARTA)
 # ============================================================
 
 @router.message(F.text.in_(["💰 Balans", "💰 Баланс"]))
@@ -1590,7 +1590,7 @@ async def balance_handler(message: Message) -> None:
 
 
 # ============================================================
-# 12. BUGUNGI BUYURTMALAR (REAL VAQT)
+# 12. BUGUNGI BUYURTMALAR (REAL-TIME YANDEX)
 # ============================================================
 
 @router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы"]))
@@ -1640,7 +1640,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 13. PUL YECHISH (24/7) VA ADMIN BILDIRISHNOMASI (TO'LIQ KARTA)
+# 13. PUL YECHISH (ADMIN PAYME/CLICK UCHUN TO'LIQ KARTA BILAN)
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -1768,7 +1768,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
     u_model = user.get("car_model", "")
     u_num = user.get("car_number", "")
 
-    # BIZNES TALAB: Adminda Payme/Click uchun to'liq karta <code></code> ichida bo'lishi shart!
+    # BIZNES TALAB: Payme/Click orqali to'lash uchun TO'LIQ 16 talik karta
     admin_alert = (
         f"💸 <b>YANGI PUL YECHISH ARIZASI! (Ariza #{w_id})</b>\n\n"
         f"🆔 POSITION: <code>{u_pos}</code>\n"
@@ -1822,7 +1822,7 @@ async def admin_approve_payout(callback: CallbackQuery):
         await callback.answer("Haydovchi topilmadi!", show_alert=True)
         return
 
-    # Yandex Pro hisobidan yechish
+    # Yandex Pro hisobidan pul yechish tranzaksiyasini yaratish
     if user.get("yandex_driver_id"):
         await yandex_api.create_transaction(
             user["yandex_driver_id"],
