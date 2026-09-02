@@ -552,7 +552,7 @@ async def db_has_pending_withdrawal(user_id: int) -> bool:
 
 
 async def db_get_pending_yandex_ids() -> Set[str]:
-    """Faol yechish arizasi (pending) bor bo'lgan Yandex haydovchi ID larini oladi."""
+    """Faol arizasi (pending) bor haydovchilar ID ro'yxati."""
     if db_pool:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch("""
@@ -789,7 +789,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (LIVE BALANS VA ANIQ ZAKAZLAR STATISTIKASI)
+# 4. YANDEX FLEET API (YAGONATOZA METOD BILAN)
 # ============================================================
 
 class YandexFleetAPI:
@@ -936,7 +936,6 @@ class YandexFleetAPI:
         }
 
     async def get_driver_balance(self, yandex_driver_id: str) -> Optional[int]:
-        """Yandex API dan real vaqt rejimida (LIVE) aniq balansni tortib oladi."""
         if not self._is_configured() or not yandex_driver_id:
             return None
 
@@ -975,13 +974,13 @@ class YandexFleetAPI:
         now_utc = now_tashkent.astimezone(timezone.utc)
 
         url = f"{self.FLEET_BASE}/v1/parks/orders/list"
-        all_orders: List[dict] = []
+        all_orders = []
         limit, offset = 500, 0
 
         try:
             session = await self._get_session()
             while True:
-                park_query: Dict[str, Any] = {
+                park_query = {
                     "id": self.park_id,
                     "order": {
                         "created_at": {
@@ -993,13 +992,7 @@ class YandexFleetAPI:
                 if yandex_driver_id:
                     park_query["driver_profile"] = {"id": [yandex_driver_id]}
 
-                payload = {
-                    "query": {
-                        "park": park_query
-                    },
-                    "limit": limit,
-                    "offset": offset
-                }
+                payload = {"query": {"park": park_query}, "limit": limit, "offset": offset}
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
                     if resp.status != 200:
@@ -1682,7 +1675,6 @@ async def balance_handler(message: Message) -> None:
     lang = user.get("language", "uz")
     y_status = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
 
-    # Har doim Yandexdan jonli (LIVE) balans tortib olinadi va db yangilanadi
     if user.get("yandex_driver_id"):
         has_pending = await db_has_pending_withdrawal(user["id"])
         live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
@@ -1803,7 +1795,6 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
 
     lang = user.get("language", "uz")
 
-    # 1 pending tekshiruvi
     has_pending = await db_has_pending_withdrawal(user["id"])
     if has_pending:
         await message.answer(
@@ -1813,7 +1804,6 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # LIVE get_driver_balance() va db_update_balance()
     if user.get("yandex_driver_id"):
         live_bal = await yandex_api.get_driver_balance(user["yandex_driver_id"])
         if live_bal is not None:
@@ -2398,7 +2388,6 @@ async def admin_sync_all_drivers(message: Message) -> None:
         )
         return
 
-    # Faol arizasi bor haydovchilarni aniqlash
     pending_yandex_ids = await db_get_pending_yandex_ids()
 
     updated_count = 0
@@ -2414,7 +2403,6 @@ async def admin_sync_all_drivers(message: Message) -> None:
             continue
 
         if y_id in pending_yandex_ids:
-            # Pul yechish arizasi ko'rib chiqilayotgan bo'lsa, balansni o'zgartirmaymiz!
             if db_pool:
                 async with db_pool.acquire() as conn:
                     await conn.execute(
@@ -2710,7 +2698,6 @@ async def yandex_auto_sync_scheduler():
                     if not y_id:
                         continue
 
-                    # Arizasi pending holatda bo'lgan haydovchining balansini Yandex bilan ezib yubormaymiz!
                     if y_id in pending_yandex_ids:
                         if db_pool:
                             async with db_pool.acquire() as conn:
@@ -2833,4 +2820,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
