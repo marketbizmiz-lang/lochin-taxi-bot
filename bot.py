@@ -789,7 +789,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (LIVE BALANS VA ANIQ FILTRLAR)
+# 4. YANDEX FLEET API (LIVE BALANS VA ANIQ ZAKAZLAR STATISTIKASI)
 # ============================================================
 
 class YandexFleetAPI:
@@ -971,74 +971,82 @@ class YandexFleetAPI:
 
         now_tashkent = datetime.now(TASHKENT_TZ)
         today_start = now_tashkent.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = today_start.astimezone(timezone.utc)
+        now_utc = now_tashkent.astimezone(timezone.utc)
 
         url = f"{self.FLEET_BASE}/v1/parks/orders/list"
-        park_query: Dict[str, Any] = {
-            "id": self.park_id,
-            "order": {
-                "booked_at": {
-                    "from": today_start.isoformat(),
-                    "to": now_tashkent.isoformat()
-                }
-            }
-        }
-        if yandex_driver_id:
-            park_query["driver_profile"] = {"id": [yandex_driver_id]}
+        all_orders: List[dict] = []
+        limit, offset = 500, 0
 
-        payload = {
-            "query": {
-                "park": park_query
-            },
-            "limit": 500
-        }
         try:
             session = await self._get_session()
-            async with session.post(url, json=payload) as resp:
-                text = await resp.text()
-                if resp.status == 200:
-                    data = json.loads(text)
-                    orders = data.get("orders", [])
-                    comp = canc = 0
-                    total_sum = cash_sum = card_sum = 0
-
-                    for o in orders:
-                        if yandex_driver_id:
-                            o_drv_id = o.get("driver_profile_id") or o.get("performer", {}).get("driver_profile_id") or ""
-                            if o_drv_id and o_drv_id != yandex_driver_id:
-                                continue
-
-                        st = o.get("status", "").lower()
-                        raw_cost = o.get("cost") or o.get("price") or o.get("total_cost") or 0
-                        try:
-                            cost = int(float(raw_cost))
-                        except Exception:
-                            cost = 0
-
-                        pay_type = str(o.get("payment_method", "card")).lower()
-
-                        if st in ("complete", "finished"):
-                            comp += 1
-                            total_sum += cost
-                            if "cash" in pay_type or "naqd" in pay_type:
-                                cash_sum += cost
-                            else:
-                                card_sum += cost
-                        elif st in ("cancelled", "canceled", "rejected"):
-                            canc += 1
-
-                    comm = int(total_sum * (COMMISSION_PERCENT / 100.0))
-                    return {
-                        "total_orders": comp + canc,
-                        "completed_orders": comp,
-                        "cancelled_orders": canc,
-                        "total_earnings": total_sum,
-                        "cash_earnings": cash_sum,
-                        "card_earnings": card_sum,
-                        "park_comm": comm
+            while True:
+                park_query: Dict[str, Any] = {
+                    "id": self.park_id,
+                    "order": {
+                        "created_at": {
+                            "from": today_start_utc.isoformat(),
+                            "to": now_utc.isoformat()
+                        }
                     }
+                }
+                if yandex_driver_id:
+                    park_query["driver_profile"] = {"id": [yandex_driver_id]}
+
+                payload = {
+                    "query": {
+                        "park": park_query
+                    },
+                    "limit": limit,
+                    "offset": offset
+                }
+                async with session.post(url, json=payload) as resp:
+                    text = await resp.text()
+                    if resp.status != 200:
+                        logger.error(f"Yandex orders error: {resp.status} {text[:300]}")
+                        break
+
+                    data = json.loads(text)
+                    batch = data.get("orders", [])
+                    all_orders.extend(batch)
+                    if len(batch) < limit:
+                        break
+                    offset += limit
+
+            comp = canc = 0
+            total_sum = cash_sum = card_sum = 0
+            for o in all_orders:
+                st = str(o.get("status", "")).lower()
+                raw_cost = o.get("cost") or o.get("price") or 0
+                try:
+                    cost = int(float(raw_cost))
+                except Exception:
+                    cost = 0
+
+                pay_type = str(o.get("payment_method", "")).lower()
+                if st in ("complete", "completed", "finished", "done"):
+                    comp += 1
+                    total_sum += cost
+                    if "cash" in pay_type:
+                        cash_sum += cost
+                    else:
+                        card_sum += cost
+                elif st in ("cancelled", "canceled", "rejected", "aborted"):
+                    canc += 1
+
+            comm = int(total_sum * (COMMISSION_PERCENT / 100.0))
+            return {
+                "total_orders": comp + canc,
+                "completed_orders": comp,
+                "cancelled_orders": canc,
+                "total_earnings": total_sum,
+                "cash_earnings": cash_sum,
+                "card_earnings": card_sum,
+                "park_comm": comm
+            }
         except Exception as e:
             logger.error(f"Yandex get_today_orders_stats xatosi: {e}")
-        return default_res
+            return default_res
 
     async def create_transaction(self, yandex_driver_id: str, amount: int, description: str) -> bool:
         if not self._is_configured() or not yandex_driver_id:
@@ -2825,3 +2833,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+```
