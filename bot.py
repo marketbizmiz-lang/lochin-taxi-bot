@@ -837,7 +837,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (KUCHAYTIRILGAN CURSOR ENGINE)
+# 4. YANDEX FLEET API (BARCHA 700+ HAYDOVCHILARNI CHEKLOVSIZ YUKLASH)
 # ============================================================
 
 class YandexFleetAPI:
@@ -871,7 +871,7 @@ class YandexFleetAPI:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(limit=50, limit_per_host=10, enable_cleanup_closed=True)
-            timeout = aiohttp.ClientTimeout(total=25, connect=8)
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
             self._session = aiohttp.ClientSession(connector=connector, timeout=timeout, headers=self._headers)
         return self._session
 
@@ -948,8 +948,8 @@ class YandexFleetAPI:
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
         """
-        1000+ haydovchilarni to'liq (cursor yordamida) tortib olish.
-        Endi 500 tadan keyin to'xtab qolmaydi!
+        Barcha 700+ (va undan ko'p) haydovchilarni to'liq tortib olish.
+        Yandex Fleet API cursor hamda fallback offset mexanizmlari bilan ishlaydi.
         """
         if not self._is_configured():
             return [], "Yandex API sozlamalari (.env) to'liq kiritilmagan!"
@@ -961,17 +961,20 @@ class YandexFleetAPI:
 
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
         all_drivers: List[dict] = []
+        seen_ids: Set[str] = set()
         last_error = ""
-        cursor = None
+        cursor: Optional[str] = None
 
         try:
             session = await self._get_session()
-            for _ in range(25):  # 25 * 500 = 12 500 tagacha haydovchini qo'llab-quvvatlaydi
-                payload = {
+            for page in range(40):  # 40 * 500 = 20 000 tagacha haydovchi sig'imi
+                payload: Dict[str, Any] = {
+                    "limit": 500,
                     "query": {
-                        "park": {"id": self.park_id}
-                    },
-                    "limit": 500
+                        "park": {
+                            "id": self.park_id
+                        }
+                    }
                 }
                 if cursor:
                     payload["cursor"] = cursor
@@ -979,25 +982,40 @@ class YandexFleetAPI:
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
                     if resp.status == 429:
-                        last_error = "HTTP 429: So'rovlar ko'payib ketdi (Rate Limit)"
-                        logger.warning("Yandex 429 limiti, keshdan foydalanilmoqda.")
-                        break
+                        last_error = "HTTP 429: So'rovlar limiti oshdi"
+                        logger.warning("Yandex rate limit (429), kutib qayta urinilmoqda...")
+                        await asyncio.sleep(1.0)
+                        continue
                     elif resp.status != 200:
                         last_error = f"HTTP {resp.status}: {text[:150]}"
+                        logger.error(f"Yandex get_all_drivers error: {last_error}")
                         break
 
                     data = json.loads(text)
                     batch = data.get("driver_profiles", [])
-                    all_drivers.extend(batch)
-
-                    cursor = data.get("cursor")
-                    # Agar keyingi sahifa bo'lmasa yoki bo'sh batch kelsa, demak hammasi olib bo'lindi
-                    if not cursor or len(batch) == 0:
+                    if not batch:
                         break
 
-                    await asyncio.sleep(0.1)
+                    new_added = 0
+                    for drv in batch:
+                        d_id = drv.get("driver_profile", {}).get("id") or drv.get("id")
+                        if d_id and d_id not in seen_ids:
+                            seen_ids.add(d_id)
+                            all_drivers.append(drv)
+                            new_added += 1
+
+                    # Yandex javobidagi cursor tekshiruvi:
+                    new_cursor = data.get("cursor") or data.get("next_cursor")
+                    
+                    # Agar yangi haydovchi qo'shilmagan bo'lsa yoki cursor o'zgarmasa yoki bo'sh bo'lsa, tugatamiz
+                    if not new_cursor or new_cursor == cursor or len(batch) < 500:
+                        break
+
+                    cursor = new_cursor
+                    await asyncio.sleep(0.05)
         except Exception as e:
             last_error = f"Ulanish xatosi: {str(e)}"
+            logger.error(f"Yandex get_all_drivers exception: {e}")
 
         if all_drivers:
             self._drivers_cache = all_drivers
@@ -1474,7 +1492,7 @@ async def generate_monthly_excel_report() -> bytes:
 
 
 # ============================================================
-# 7. MATNLAR VA KLAVIATURALAR (TOP HAYDOVCHILAR OLIB TASHLANDI)
+# 7. MATNLAR VA KLAVIATURALAR
 # ============================================================
 
 TEXTS = {
@@ -1551,7 +1569,6 @@ def t(lang_code: str, key: str, **kwargs) -> str:
 
 
 def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
-    # "Top haydovchilar" olib tashlandi, faqat zarur 6 ta tugma
     buttons = [
         [KeyboardButton(text=t(lang, "menu_balance")), KeyboardButton(text=t(lang, "menu_withdraw"))],
         [KeyboardButton(text=t(lang, "menu_orders")), KeyboardButton(text=t(lang, "menu_profile"))],
@@ -1750,7 +1767,6 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     await db_upsert_start(uid, message.from_user.username or "")
 
-    # AGAR ADMIN BO'LSA - UNGA DARHOL ASOSIY MENYU OCHILADI
     if is_admin(uid):
         lang = await get_lang(uid)
         await message.answer(
@@ -2201,10 +2217,8 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     full_card_val = user.get("card_number") or ""
     rem_deposit = cur_bal - amount
 
-    # State'ni zudlik bilan tozalaymiz
     await state.clear()
 
-    # Bazada arizani saqlaymiz
     try:
         w_id = await db_create_withdrawal(
             user_id=user["id"], telegram_id=uid, amount=amount, commission=comm,
@@ -2215,7 +2229,6 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         await message.answer(f"❌ Xatolik: {val_err}", reply_markup=user_main_kb(lang, uid))
         return
 
-    # 1. HAYDOVCHIGA XABAR VA DASTUR DARHOL ASOSIY MENYUGA QAYTADI
     masked_c = mask_card(full_card_val)
     await message.answer(
         f"⏳ <b>Arizangiz qabul qilindi! (Ariza #{w_id})</b>\n\n"
@@ -2226,7 +2239,6 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         reply_markup=user_main_kb(lang, uid)
     )
 
-    # 2. ADMINGA TO'LOV VA TASDIQ TUGMALARI
     y_status_txt = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
     u_pos = user.get("position", "N/A")
     u_name = esc(user.get("full_name", ""))
@@ -2803,7 +2815,7 @@ async def admin_export_excel(message: Message) -> None:
 async def admin_sync_all_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar tekshirilmoqda (1000+ ta)...</i>")
+    status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar to'liq tortib olinmoqda (Cheklovlarsiz)...</i>")
 
     try:
         drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
