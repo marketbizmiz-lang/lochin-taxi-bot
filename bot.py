@@ -834,7 +834,7 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 60
+        self._cache_ttl = 45
         self._stats_cache: Optional[dict] = None
         self._stats_cache_ts: Optional[datetime] = None
         self._stats_cache_ttl = 30
@@ -855,7 +855,7 @@ class YandexFleetAPI:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(limit=50, limit_per_host=10, enable_cleanup_closed=True)
-            timeout = aiohttp.ClientTimeout(total=20, connect=5)
+            timeout = aiohttp.ClientTimeout(total=25, connect=8)
             self._session = aiohttp.ClientSession(connector=connector, timeout=timeout, headers=self._headers)
         return self._session
 
@@ -946,7 +946,7 @@ class YandexFleetAPI:
 
         try:
             session = await self._get_session()
-            for _ in range(10):
+            for _ in range(15):
                 payload = {
                     "query": {"park": {"id": self.park_id}},
                     "limit": limit,
@@ -955,8 +955,8 @@ class YandexFleetAPI:
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
                     if resp.status == 429:
-                        last_error = "HTTP 429: Limit exceeded (Yandex so'rovlar limiti)"
-                        logger.warning("Yandex 429 oldi, keshdan foydalanilmoqda.")
+                        last_error = "HTTP 429: Limit exceeded"
+                        logger.warning("Yandex 429 limiti, keshdan foydalanilmoqda.")
                         break
                     elif resp.status != 200:
                         last_error = f"HTTP {resp.status}: {text[:200]}"
@@ -968,7 +968,7 @@ class YandexFleetAPI:
                     if len(batch) < limit:
                         break
                     offset += limit
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.08)
         except Exception as e:
             last_error = f"Ulanish xatosi: {str(e)}"
 
@@ -2829,12 +2829,11 @@ async def admin_sync_all_drivers(message: Message) -> None:
 
         p_clean = clean_phone_number(phone) if phone else ""
 
-        # Bazada borligini tekshirish
         existing_user = None
         if db_pool:
             async with db_pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT id, balance, position FROM users WHERE yandex_driver_id=$1 OR (phone=$2 AND phone != '')",
+                    "SELECT id FROM users WHERE yandex_driver_id=$1 OR (phone=$2 AND phone != '')",
                     y_id, p_clean
                 )
                 existing_user = dict(row) if row else None
@@ -2842,14 +2841,13 @@ async def admin_sync_all_drivers(message: Message) -> None:
             conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT id, balance, position FROM users WHERE yandex_driver_id=? OR (phone=? AND phone != '')",
+                "SELECT id FROM users WHERE yandex_driver_id=? OR (phone=? AND phone != '')",
                 (y_id, p_clean)
             ).fetchone()
             existing_user = dict(row) if row else None
             conn.close()
 
         if existing_user:
-            # Mavjud haydovchini yangilash
             u_id = existing_user["id"]
             if y_id in pending_yandex_ids:
                 if db_pool:
@@ -2887,7 +2885,6 @@ async def admin_sync_all_drivers(message: Message) -> None:
                     conn.close()
             updated_count += 1
         else:
-            # Yangi haydovchi bo'lsa BAZAGA QO'SHISH (INSERT)
             new_pos = await db_generate_unique_position()
             if db_pool:
                 async with db_pool.acquire() as conn:
@@ -2923,18 +2920,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
 async def admin_list_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    wait_msg = await message.answer("⏳ <i>Haydovchilar ro'yxati va real vaqtdagi balanslar olinmoqda...</i>")
-
-    y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=False)
-    y_map_by_id = {}
-    y_map_by_phone = {}
-    for raw in y_drivers:
-        norm = yandex_api._normalize(raw)
-        if norm.get("id"):
-            y_map_by_id[norm["id"]] = norm
-        if norm.get("phone"):
-            p_dig = re.sub(r"\D", "", norm["phone"])[-9:]
-            y_map_by_phone[p_dig] = norm
+    wait_msg = await message.answer("⏳ <i>Haydovchilar ro'yxati olinmoqda...</i>")
 
     drivers = await db_get_all_registered_drivers()
     try:
@@ -2946,60 +2932,31 @@ async def admin_list_drivers(message: Message) -> None:
         await message.answer("Hozircha ro'yxatdan o'tgan haydovchilar yo'q. '🔄 Yandex Sinxronlash' tugmasini bosing.")
         return
 
-    now_iso = tashkent_now_iso()
-    text = f"👥 <b>Barcha Haydovchilar Ro'yxati (Real vaqt | Jami: {len(drivers)} ta):</b>\n\n"
+    # Telegram limitiga tushmaslik uchun xabarlarni 20 tadan bo'lib yuboramiz
+    total_count = len(drivers)
+    await message.answer(f"👥 <b>Barcha Haydovchilar Ro'yxati (Jami: {total_count} ta):</b>")
 
-    for idx, drv in enumerate(drivers, 1):
-        d_id = drv["id"]
-        d_pos = drv.get("position", "N/A")
-        d_name = drv.get("full_name", "Haydovchi")
-        d_phone = drv.get("phone", "")
-        d_model = drv.get("car_model", "")
-        d_num = drv.get("car_number", "")
-        d_card_mask = mask_card(drv.get("card_number", ""))
-
-        y_id = drv.get("yandex_driver_id")
-        p_dig = re.sub(r"\D", "", d_phone)[-9:] if d_phone else ""
-        y_info = y_map_by_id.get(y_id) or y_map_by_phone.get(p_dig)
-
-        if y_info:
-            live_bal = int(y_info["balance"])
-            if y_info.get("is_on_order"):
-                st_icon = "🟢 Zakazda"
-            elif y_info.get("work_status") == "working":
-                st_icon = "🟡 Liniyada"
-            else:
-                st_icon = "⚪️ Oflayn"
-
-            bal_str = f"{fmt_sum(live_bal)} so'm ({st_icon})"
-            has_pending = await db_has_pending_withdrawal(d_id)
-            if not has_pending and int(drv.get("balance", 0) or 0) != live_bal:
-                if drv.get("telegram_id"):
-                    await db_update_balance(drv["telegram_id"], live_bal)
-            if not y_id and y_info.get("id"):
-                if db_pool:
-                    async with db_pool.acquire() as conn:
-                        await conn.execute("UPDATE users SET yandex_driver_id=$1, updated_at=$2 WHERE id=$3", y_info["id"], now_iso, d_id)
-                else:
-                    conn = sqlite3.connect(DB_PATH, timeout=10)
-                    with conn:
-                        conn.execute("UPDATE users SET yandex_driver_id=?, updated_at=? WHERE id=?", (y_info["id"], now_iso, d_id))
-                    conn.close()
-        else:
+    chunk_size = 20
+    for chunk_start in range(0, total_count, chunk_size):
+        chunk = drivers[chunk_start:chunk_start + chunk_size]
+        text = ""
+        for idx, drv in enumerate(chunk, chunk_start + 1):
+            d_pos = drv.get("position", "N/A")
+            d_name = drv.get("full_name", "Haydovchi")
+            d_phone = drv.get("phone", "Yo'q")
+            d_model = drv.get("car_model", "")
+            d_num = drv.get("car_number", "")
             bal_str = f"{fmt_sum(drv.get('balance', 0))} so'm"
 
-        item = (
-            f"<b>{idx}.</b> 🆔 <code>{d_pos}</code> — <b>{d_name}</b>\n"
-            f"   📱 {d_phone} | 🚗 {d_model} ({d_num})\n"
-            f"   💳 {d_card_mask} | 💰 Balans: <b>{bal_str}</b>\n---------------------------\n"
-        )
-        if len(text) + len(item) > 4000:
-            await message.answer(text)
-            text = ""
-        text += item
+            text += (
+                f"<b>{idx}.</b> 🆔 <code>{d_pos}</code> — <b>{d_name}</b>\n"
+                f"   📱 <code>{d_phone}</code> | 🚗 {d_model} ({d_num})\n"
+                f"   💰 Balans: <b>{bal_str}</b>\n---------------------------\n"
+            )
 
-    if text:
-        await message.answer(text)
+        if text:
+            await message.answer(text)
+            await asyncio.sleep(0.3)  # Telegram anti-flood pauza
 
 
 @admin_router.message(F.text.in_(["🗑 Haydovchini o'chirish", "🗑 Удалить водителя"]), StateFilter("*"))
@@ -3210,11 +3167,11 @@ async def yandex_auto_sync_scheduler():
                     car_model = norm["car_model"]
                     full_name = norm["full_name"]
                     phone = norm["phone"]
-                    p_clean = clean_phone_number(phone) if phone else ""
                     if not y_id:
                         continue
 
-                    # Mavjudligini tekshirish
+                    p_clean = clean_phone_number(phone) if phone else ""
+
                     if db_pool:
                         async with db_pool.acquire() as conn:
                             row = await conn.fetchrow(
