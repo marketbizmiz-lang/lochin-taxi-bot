@@ -109,14 +109,16 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Kapitalbank OpenAPI sozlamalari
+# ============================================================
+# KAPITALBANK ANIQ REKVIZITLARI (SKRINSHОT BO'YICHA)
+# ============================================================
 KAPITAL_API_URL = os.getenv("KAPITAL_API_URL", "https://m.bank24.uz:2713").strip()
-KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "").strip()
-KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "").strip()
-KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "").strip()
-KAPITAL_MFO = os.getenv("KAPITAL_MFO", "").strip()
-KAPITAL_INN = os.getenv("KAPITAL_INN", "").strip()
-KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", BOT_NAME).strip()
+KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "KUDRAT198SK").strip()
+KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "$e09hZzU").strip()
+KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "20208000607311468002").strip()
+KAPITAL_MFO = os.getenv("KAPITAL_MFO", "01158").strip()
+KAPITAL_INN = os.getenv("KAPITAL_INN", "312433744").strip()
+KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", '"LOCHIN TAKSI"MCHJ').strip()
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
 MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))
@@ -139,7 +141,7 @@ def is_admin(user_id: int) -> bool:
 
 
 def esc(text: Any) -> str:
-    """Telegram HTML entitylarida xatolik chiqmasligi uchun matnni qochirish"""
+    """Telegram HTML parsing xatolarini oldini olish uchun matnlarni qochirish"""
     return html.escape(str(text or ""))
 
 
@@ -1236,7 +1238,7 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 5. KAPITALBANK OPENAPI INTEGRATION
+# 5. KAPITALBANK INTEGRATSIYA (SIZNING REKVIZITLARINGIZ BILAN)
 # ============================================================
 
 class KapitalBankAPI:
@@ -1255,8 +1257,8 @@ class KapitalBankAPI:
 
     @property
     def auth_header(self) -> str:
-        prefix = "" if self.login.startswith("IB#") else "IB#"
-        raw_cred = f"{prefix}{self.login}:{self.password}"
+        # Bank bergan KUDRAT198SK va parolni aynan toza formatda yuborish
+        raw_cred = f"{self.login}:{self.password}"
         enc = base64.b64encode(raw_cred.encode("utf-8")).decode("ascii")
         return f"Basic {enc}"
 
@@ -1277,7 +1279,7 @@ class KapitalBankAPI:
 
     async def send_card_payout(self, target_card: str, amount_sum: int, doc_id: int) -> Tuple[bool, str, str]:
         if not self.is_configured():
-            return False, "Kapitalbank hisob raqami va MFO hali kiritilmagan (.env da to'ldiring)", ""
+            return False, "Kapitalbank hisob raqami va rekvizitlari kiritilmagan", ""
 
         clean_card = re.sub(r"\D", "", str(target_card))
         if len(clean_card) != 16:
