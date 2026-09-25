@@ -104,14 +104,14 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Bank sozlamalari
+# Bank sozlamalari (Render Environment Variables)
 KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "").strip()
 KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", "").strip()
 KAPITAL_INN = os.getenv("KAPITAL_INN", "").strip()
 KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "").strip()
 KAPITAL_MFO = os.getenv("KAPITAL_MFO", "").strip()
 KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "").strip()
-KAPITAL_BASE_URL = os.getenv("KAPITAL_BASE_URL", "").strip()
+KAPITAL_BASE_URL = os.getenv("KAPITAL_BASE_URL", "").strip() or "https://api-b2b.kapitalbank.uz"
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
 MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))
@@ -1189,7 +1189,7 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 4.1. BANK API (KAPITAL / B2B)
+# 4.1. BANK API (KAPITALBANK REAL AVTO-TO'LOV)
 # ============================================================
 
 class BankPayoutAPI:
@@ -1200,11 +1200,11 @@ class BankPayoutAPI:
         self.mfo = mfo.strip()
         self.inn = inn.strip()
         self.company = company.strip()
-        self.base_url = base_url.rstrip("/") if base_url else ""
+        self.base_url = (base_url or "https://api-b2b.kapitalbank.uz").rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None
 
     def is_configured(self) -> bool:
-        return bool(self.base_url and self.login and self.account)
+        return bool(self.login and self.account)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -1218,21 +1218,30 @@ class BankPayoutAPI:
 
     async def send_payout(self, card_number: str, amount_sum: int, withdrawal_id: int) -> Tuple[bool, str]:
         if not self.is_configured():
-            return False, "Bank API URL sozlanmagan"
+            return False, "Bank login yoki hisob raqami kiritilmagan!"
         try:
             session = await self._get_session()
-            headers = {"Content-Type": "application/json"}
+            headers = {
+                "Content-Type": "application/json",
+            }
+            if self.login and self.password:
+                auth_str = f"{self.login}:{self.password}"
+                headers["Authorization"] = f"Basic {base64.b64encode(auth_str.encode()).decode()}"
+
             payload = {
                 "account": self.account,
+                "mfo": self.mfo,
+                "inn": self.inn,
                 "card_number": re.sub(r"\D", "", card_number),
                 "amount": int(amount_sum),
                 "order_id": f"LCH_{withdrawal_id}_{int(time.time())}"
             }
+            # Kapitalbank B2B to'lov endpointiga yuborish
             async with session.post(f"{self.base_url}/api/v1/payout", json=payload, headers=headers) as resp:
                 text = await resp.text()
                 if resp.status in (200, 201):
-                    return True, f"BANK-OK-{withdrawal_id}"
-                return False, f"Bank xatosi (HTTP {resp.status}): {text[:100]}"
+                    return True, f"BANK-KB-{withdrawal_id}"
+                return False, f"Bank xatosi (HTTP {resp.status}): {text[:120]}"
         except Exception as e:
             return False, f"Bank ulanish xatosi: {e}"
 
@@ -2180,7 +2189,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         f"🚖 <b>Yandex Pro:</b> {y_status_txt}"
     )
 
-    # Siz so'ragandek: Click/Payme bitta tugmada, Bank alohida tugmada
+    # Siz aytgan aniq tugmalar
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🔵 Click / 🟢 Payme orqali to'lash", callback_data=f"adm_p2p_menu:{w_id}")
@@ -2230,14 +2239,14 @@ async def admin_p2p_choose_menu(callback: CallbackQuery):
             InlineKeyboardButton(text="🟢 Payme orqali to'lash", url=payme_url)
         ],
         [
-            InlineKeyboardButton(text="✅ To'lovni tasdiqlash (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}")
+            InlineKeyboardButton(text="✅ To'ladim (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}")
         ]
     ])
     await callback.message.reply(
         f"💳 <b>Ariza #{w_id} — To'lov xizmatini tanlang:</b>\n\n"
-        f"Summa: <b>{fmt_sum(amount)} so'm</b>\n"
-        f"Karta: <code>{card}</code>\n\n"
-        f"<i>Tugmani bosganingizda ilova yoki to'lov sahifasi to'ldirilgan holda ochiladi:</i>",
+        f"💰 Summa: <b>{fmt_sum(amount)} so'm</b>\n"
+        f"💳 Karta: <code>{card}</code>\n\n"
+        f"<i>Tugmani bosganingizda Click yoki Payme to'lov sahifasi to'ldirilgan holda ochiladi:</i>",
         reply_markup=p2p_kb
     )
     await callback.answer()
@@ -2263,21 +2272,24 @@ async def admin_bank_payout_action(callback: CallbackQuery):
     card = wd.get("card_number", "")
     net_amt = int(wd.get("net_amount", 0))
 
-    if not bank_payout_api.is_configured():
-        await callback.message.reply(
-            "⚠️ <b>Bank API (Kapitalbank) serverda to'liq ulanmagan yoki BASE_URL ko'rsatilmagan!</b>\n\n"
-            "Iltimos, yuqoridagi <b>[🔵 Click / 🟢 Payme orqali to'lash]</b> tugmasidan foydalaning va to'langach <b>[✅ To'landi]</b> tugmasini bosing."
-        )
-        await callback.answer("Bank API ulanmagan!", show_alert=True)
-        return
-
     await callback.answer("Bankka to'lov so'rovi yuborilmoqda...", show_alert=False)
     success, res_msg = await bank_payout_api.send_payout(card, net_amt, w_id)
 
     if not success:
+        click_u, payme_u = get_payment_deep_links(card, net_amt)
+        fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔵 Click", url=click_u),
+                InlineKeyboardButton(text="🟢 Payme", url=payme_u)
+            ],
+            [
+                InlineKeyboardButton(text="✅ To'ladim (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}")
+            ]
+        ])
         await callback.message.reply(
-            f"⚠️ <b>Bank to'lovida xatolik yuz berdi:</b>\n<code>{res_msg}</code>\n\n"
-            f"<i>Siz 'Click / Payme orqali to'lash' tugmasi bilan to'lashingiz mumkin.</i>"
+            f"⚠️ <b>Bank serveriga to'lov so'rovi yuborilmadi yoki IP cheklovi mavjud:</b>\n<code>{res_msg}</code>\n\n"
+            f"👉 <b>Quyidagi Click yoki Payme orqali 1 ta bosishda to'lab, 'To'ladim' tugmasini bosing:</b>",
+            reply_markup=fallback_kb
         )
         return
 
@@ -2609,7 +2621,7 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# 16. ADMIN PANEL VA BARCHA HAYDOVCHILARNI TIKLASH
+# 16. ADMIN PANEL
 # ============================================================
 
 @admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]), StateFilter("*"))
@@ -2765,7 +2777,6 @@ async def admin_sync_all_drivers(message: Message) -> None:
         existing = await db_get_user_by_phone(p_clean) if p_clean else None
 
         if not existing:
-            # Agar haydovchi bot bazasida bo'lmasa, uni Yandexdan to'liq import qilamiz
             pos = await db_generate_unique_position()
             dummy_tg_id = -abs(int(hashlib.md5(y_id.encode()).hexdigest()[:8], 16))
             if db_pool:
@@ -2785,7 +2796,6 @@ async def admin_sync_all_drivers(message: Message) -> None:
                 conn.close()
             imported_count += 1
         else:
-            # Mavjud bo'lsa ma'lumotlarini yangilash
             if db_pool:
                 async with db_pool.acquire() as conn:
                     await conn.execute("""
