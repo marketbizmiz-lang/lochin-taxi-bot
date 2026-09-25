@@ -109,9 +109,7 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# ============================================================
-# KAPITALBANK ANIQ REKVIZITLARI (SKRINSHОT BO'YICHA)
-# ============================================================
+# Kapitalbank sozlamalari
 KAPITAL_API_URL = os.getenv("KAPITAL_API_URL", "https://m.bank24.uz:2713").strip()
 KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "KUDRAT198SK").strip()
 KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "$e09hZzU").strip()
@@ -141,7 +139,6 @@ def is_admin(user_id: int) -> bool:
 
 
 def esc(text: Any) -> str:
-    """Telegram HTML parsing xatolarini oldini olish uchun matnlarni qochirish"""
     return html.escape(str(text or ""))
 
 
@@ -228,7 +225,7 @@ async def init_database():
                         blocked_balance   BIGINT DEFAULT 0,
                         is_registered     INT DEFAULT 0,
                         is_blocked        INT DEFAULT 0,
-                        yandex_driver_id  TEXT UNIQUE,
+                        yandex_driver_id  TEXT,
                         referrer_id       BIGINT,
                         total_orders      INT DEFAULT 0,
                         total_earnings    BIGINT DEFAULT 0,
@@ -288,7 +285,7 @@ async def init_database():
                 blocked_balance  INTEGER DEFAULT 0,
                 is_registered    INTEGER DEFAULT 0,
                 is_blocked       INTEGER DEFAULT 0,
-                yandex_driver_id TEXT UNIQUE,
+                yandex_driver_id TEXT,
                 referrer_id      INTEGER,
                 total_orders     INTEGER DEFAULT 0,
                 total_earnings   INTEGER DEFAULT 0,
@@ -495,7 +492,6 @@ async def db_finish_registration(
     telegram_id: int, full_name: str, phone: str, card_number: str,
     car_model: str, car_number: str, yandex_driver_id: Optional[str],
 ) -> str:
-    position = await db_generate_unique_position()
     now = tashkent_now_iso()
     enc_card = encrypt_card(card_number)
     phone_clean = clean_phone_number(phone)
@@ -503,12 +499,19 @@ async def db_finish_registration(
     if phone_clean == OWNER_PHONE:
         ADMIN_IDS.add(telegram_id)
 
+    # Avval position mavjudligini tekshiramiz
+    existing = await db_get_user(telegram_id)
+    if existing and existing.get("position"):
+        position = existing["position"]
+    else:
+        position = await db_generate_unique_position()
+
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute(
                 """UPDATE users SET 
                     full_name=$1, phone=$2, card_number=$3, car_model=$4, 
-                    car_number=$5, position=$6, yandex_driver_id=$7, is_registered=1, 
+                    car_number=$5, position=COALESCE(position, $6), yandex_driver_id=$7, is_registered=1, 
                     last_activity=$8, updated_at=$8 
                 WHERE telegram_id=$9""",
                 full_name, phone_clean, enc_card, car_model, car_number, position, yandex_driver_id, now, telegram_id,
@@ -519,7 +522,7 @@ async def db_finish_registration(
             conn.execute(
                 """UPDATE users SET 
                     full_name=?, phone=?, card_number=?, car_model=?, 
-                    car_number=?, position=?, yandex_driver_id=?, is_registered=1, 
+                    car_number=?, position=COALESCE(position, ?), yandex_driver_id=?, is_registered=1, 
                     last_activity=?, updated_at=? 
                 WHERE telegram_id=?""",
                 (full_name, phone_clean, enc_card, car_model, car_number, position, yandex_driver_id, now, now, telegram_id),
@@ -1238,7 +1241,7 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 5. KAPITALBANK INTEGRATSIYA (SIZNING REKVIZITLARINGIZ BILAN)
+# 5. KAPITALBANK INTEGRATSIYA
 # ============================================================
 
 class KapitalBankAPI:
@@ -1257,7 +1260,6 @@ class KapitalBankAPI:
 
     @property
     def auth_header(self) -> str:
-        # Bank bergan KUDRAT198SK va parolni aynan toza formatda yuborish
         raw_cred = f"{self.login}:{self.password}"
         enc = base64.b64encode(raw_cred.encode("utf-8")).decode("ascii")
         return f"Basic {enc}"
@@ -1773,7 +1775,7 @@ async def lang_callback(callback: CallbackQuery) -> None:
 
 
 # ============================================================
-# 11. RO'YXATDAN O'TISH HANDLERLARI
+# 11. RO'YXATDAN O'TISH HANDLERLARI (KUCHAYTIRILGAN)
 # ============================================================
 
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]), StateFilter("*"))
@@ -1913,19 +1915,27 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     car_number = data.get("car_number") or ""
     y_id = data.get("yandex_driver_id")
 
-    position = await db_finish_registration(
-        telegram_id=uid, full_name=full_name, phone=phone, card_number=card,
-        car_model=car_model, car_number=car_number, yandex_driver_id=y_id,
-    )
+    try:
+        position = await db_finish_registration(
+            telegram_id=uid, full_name=full_name, phone=phone, card_number=card,
+            car_model=car_model, car_number=car_number, yandex_driver_id=y_id,
+        )
+    except Exception as e:
+        logger.error(f"db_finish_registration error: {e}")
+        position = "LCH-AUTO"
 
+    # Haydovchiga zudlik bilan javob va menyu qaytaramiz (qotib qolmasligi uchun)
     await message.answer(t(lang, "reg_success", position=position), reply_markup=user_main_kb(lang, uid))
 
     init_bal = 0
     if y_id:
-        live_b = await yandex_api.get_driver_balance(y_id, phone=phone)
-        if live_b is not None:
-            init_bal = live_b
-            await db_update_balance(uid, live_b)
+        try:
+            live_b = await yandex_api.get_driver_balance(y_id, phone=phone)
+            if live_b is not None:
+                init_bal = live_b
+                await db_update_balance(uid, live_b)
+        except Exception:
+            pass
 
     yandex_txt = "Ulangan ✅" if y_id else "Ulanmagan ❌"
 
@@ -1945,10 +1955,11 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     ]])
 
     for adm in ADMIN_IDS:
-        try:
-            await bot.send_message(adm, admin_alert, reply_markup=adm_kb)
-        except Exception:
-            pass
+        if adm != uid:  # Agar admin o'zi ro'yxatdan o'tayotgan bo'lsa, o'ziga takroriy yuborilmaydi
+            try:
+                await bot.send_message(adm, admin_alert, reply_markup=adm_kb)
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -2919,19 +2930,16 @@ async def admin_sync_all_drivers(message: Message) -> None:
                             """INSERT INTO users 
                                 (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
                             VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)
-                            ON CONFLICT (yandex_driver_id) DO UPDATE SET 
-                                balance=EXCLUDED.balance, updated_at=EXCLUDED.updated_at""",
+                            ON CONFLICT (position) DO NOTHING""",
                             full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now
                         )
                 else:
                     conn = sqlite3.connect(DB_PATH, timeout=10)
                     with conn:
                         conn.execute(
-                            """INSERT INTO users 
+                            """INSERT OR IGNORE INTO users 
                                 (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                            ON CONFLICT (yandex_driver_id) DO UPDATE SET 
-                                balance=excluded.balance, updated_at=excluded.updated_at""",
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
                             (full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now, now)
                         )
                     conn.close()
@@ -3234,8 +3242,7 @@ async def yandex_auto_sync_scheduler():
                                     """INSERT INTO users 
                                         (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
                                     VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)
-                                    ON CONFLICT (yandex_driver_id) DO UPDATE SET 
-                                        balance=EXCLUDED.balance, updated_at=EXCLUDED.updated_at""",
+                                    ON CONFLICT (position) DO NOTHING""",
                                     full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now
                                 )
                     else:
@@ -3265,11 +3272,9 @@ async def yandex_auto_sync_scheduler():
                             new_pos = await db_generate_unique_position()
                             with conn:
                                 conn.execute(
-                                    """INSERT INTO users 
+                                    """INSERT OR IGNORE INTO users 
                                         (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                                    ON CONFLICT (yandex_driver_id) DO UPDATE SET 
-                                        balance=excluded.balance, updated_at=excluded.updated_at""",
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
                                     (full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now, now)
                                 )
                         conn.close()
