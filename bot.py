@@ -104,13 +104,13 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Kapitalbank OpenAPI sozlamalari (Render Environment orqali xavfsiz olinadi)
+# Kapitalbank OpenAPI sozlamalari
 KAPITAL_API_URL = os.getenv("KAPITAL_API_URL", "https://m.bank24.uz:2713").strip()
 KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "").strip()
 KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "").strip()
-KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "").strip()  # 20208...
-KAPITAL_MFO = os.getenv("KAPITAL_MFO", "").strip()          # Masalan: 00974
-KAPITAL_INN = os.getenv("KAPITAL_INN", "").strip()          # Tashkilot INN
+KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "").strip()
+KAPITAL_MFO = os.getenv("KAPITAL_MFO", "").strip()
+KAPITAL_INN = os.getenv("KAPITAL_INN", "").strip()
 KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", BOT_NAME).strip()
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
@@ -203,7 +203,7 @@ async def init_database():
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
                         id                SERIAL PRIMARY KEY,
-                        telegram_id       BIGINT UNIQUE NOT NULL,
+                        telegram_id       BIGINT UNIQUE,
                         username          TEXT,
                         full_name         TEXT,
                         phone             TEXT UNIQUE,
@@ -263,7 +263,7 @@ async def init_database():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id      INTEGER UNIQUE NOT NULL,
+                telegram_id      INTEGER UNIQUE,
                 username         TEXT,
                 full_name        TEXT,
                 phone            TEXT UNIQUE,
@@ -306,7 +306,7 @@ async def init_database():
         conn.commit()
 
         row = conn.execute("SELECT telegram_id FROM users WHERE phone = ?", (OWNER_PHONE,)).fetchone()
-        if row:
+        if row and row[0]:
             ADMIN_IDS.add(int(row[0]))
 
         conn.close()
@@ -321,7 +321,7 @@ def _process_user_dict(d: Optional[dict]) -> Optional[dict]:
         res["card_number"] = decrypt_card(res["card_number"])
     if "balance" in res:
         res["balance"] = int(res["balance"] or 0)
-    if res.get("phone") and clean_phone_number(res["phone"]) == OWNER_PHONE:
+    if res.get("phone") and clean_phone_number(res["phone"]) == OWNER_PHONE and res.get("telegram_id"):
         ADMIN_IDS.add(int(res["telegram_id"]))
     return res
 
@@ -690,12 +690,12 @@ async def db_get_driver_today_withdrawn(user_id: int) -> int:
 async def db_get_all_registered_drivers() -> List[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM users WHERE is_registered=1 ORDER BY id ASC")
+            rows = await conn.fetch("SELECT * FROM users WHERE is_registered=1 OR yandex_driver_id IS NOT NULL ORDER BY id ASC")
             return [_process_user_dict(dict(r)) for r in rows]
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM users WHERE is_registered=1 ORDER BY id ASC").fetchall()
+        rows = conn.execute("SELECT * FROM users WHERE is_registered=1 OR yandex_driver_id IS NOT NULL ORDER BY id ASC").fetchall()
         conn.close()
         return [_process_user_dict(dict(r)) for r in rows]
 
@@ -721,7 +721,7 @@ async def db_get_stats() -> dict:
     if db_pool:
         async with db_pool.acquire() as conn:
             total_users     = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
-            registered      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_registered=1") or 0
+            registered      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_registered=1 OR yandex_driver_id IS NOT NULL") or 0
             yandex_linked   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''") or 0
 
             today_withdrawn = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= $1", today_start) or 0
@@ -734,14 +734,14 @@ async def db_get_stats() -> dict:
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         total_users     = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        registered      = conn.execute("SELECT COUNT(*) FROM users WHERE is_registered=1").fetchone()[0]
+        registered      = conn.execute("SELECT COUNT(*) FROM users WHERE is_registered=1 OR yandex_driver_id IS NOT NULL").fetchone()[0]
         yandex_linked   = conn.execute("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''").fetchone()[0]
 
         today_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= ?", (today_start,)).fetchone()[0]
         month_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= ?", (month_start,)).fetchone()[0]
         total_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
 
-        pending_count   = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'") or 0
+        pending_count   = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'").fetchone()[0]
         pending_sum     = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'") or 0
         total_comm      = conn.execute("SELECT COALESCE(SUM(commission),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
         conn.close()
@@ -1239,12 +1239,10 @@ class KapitalBankAPI:
         self._session: Optional[aiohttp.ClientSession] = None
 
     def is_configured(self) -> bool:
-        return bool(self.login and self.password and self.account and self.mfo)
+        return bool(self.login and self.password and self.account and self.mfo and self.account != "0")
 
     @property
     def auth_header(self) -> str:
-        # Basic auth (IP bilan bog'langan xavfsiz ulanish)
-        # IBK yoki Mobil ilova loginiga qarab prefiks avtomatik o'rnatiladi
         prefix = "" if self.login.startswith("IB#") else "IB#"
         raw_cred = f"{prefix}{self.login}:{self.password}"
         enc = base64.b64encode(raw_cred.encode("utf-8")).decode("ascii")
@@ -1266,28 +1264,18 @@ class KapitalBankAPI:
             await self._session.close()
 
     async def send_card_payout(self, target_card: str, amount_sum: int, doc_id: int) -> Tuple[bool, str, str]:
-        """
-        Kapitalbank OpenAPI orqali kartani to'ldirish (dtype="97").
-        amount_sum — so'mda (masalan, 50000 so'm).
-        Bankka tiyinlarda yuboriladi (amount_sum * 100).
-        """
         if not self.is_configured():
-            return False, "Kapitalbank API sozlamalari to'liq emas (.env faylda KAPITAL_* o'zgaruvchilarni tekshiring)", ""
+            return False, "Kapitalbank hisob raqami va MFO hali kiritilmagan (.env da to'ldiring)", ""
 
         clean_card = re.sub(r"\D", "", str(target_card))
         if len(clean_card) != 16:
             return False, "Plastik karta raqami noto'g'ri (16 ta raqam bo'lishi shart)", ""
 
-        # Hujjat bo'yicha summa tiyinlarda uzatiladi
         amount_tiyin = int(amount_sum) * 100
-
         now_tashkent = datetime.now(TASHKENT_TZ)
         date_str = now_tashkent.strftime("%d.%m.%Y")
         now_micro = now_tashkent.strftime("%Y%m%d%H%M%S%f")[:17]
         uniq_id = f"{now_micro}{doc_id}{self.login}"[:35]
-
-        # Hujjatning 13-bet talabi:
-        # dtype = "97", purpose oxirida figurali qavsda to'liq karta raqami bo'lishi shart
         purpose_text = f"Lochin Taxi to'lovi #{doc_id} {{{clean_card}}}"
 
         payload = {
@@ -1814,7 +1802,7 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
     phone = clean_phone_number(message.contact.phone_number)
 
     existing_phone_user = await db_get_user_by_phone(phone)
-    if existing_phone_user and existing_phone_user.get("telegram_id") != uid and existing_phone_user.get("is_registered") == 1:
+    if existing_phone_user and existing_phone_user.get("telegram_id") and existing_phone_user.get("telegram_id") != uid and existing_phone_user.get("is_registered") == 1:
         await message.answer(
             "❌ <b>Ushbu telefon raqami allaqachon boshqa profilga biriktirilgan!</b>\nIltimos, ma'muriyatga murojaat qiling.",
             reply_markup=user_main_kb(lang, uid)
@@ -2242,7 +2230,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         f"🚖 <b>Yandex Pro:</b> {y_status_txt}"
     )
 
-    # Kapitalbank avto-to'lov tugmasi bilan boyitilgan klaviatura
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="💳 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")
@@ -2270,7 +2257,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
 @admin_router.callback_query(F.data.startswith("adm_kapital:"))
 async def admin_kapitalbank_payout(callback: CallbackQuery):
-    """Kapitalbank OpenAPI orqali kartaga to'g'ridan-to'g'ri to'lash"""
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!", show_alert=True)
         return
@@ -2291,7 +2277,6 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
 
     await callback.answer("⏳ Kapitalbankka to'lov so'rovi yuborilmoqda...")
 
-    # 1. Kapitalbank API ga so'rov yuborish
     success, bank_msg, tx_id = await kapital_bank_api.send_card_payout(
         target_card=card_num,
         amount_sum=net_amount,
@@ -2299,7 +2284,6 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
     )
 
     if not success:
-        # Bank rad etsa, adminga xabar beriladi, ariza yopilmaydi
         await callback.message.reply(
             f"❌ <b>Kapitalbank to'lovida xatolik yuz berdi!</b>\n\n"
             f"🔍 <b>Sabab:</b> <code>{bank_msg}</code>\n\n"
@@ -2307,7 +2291,6 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
         )
         return
 
-    # 2. Bank to'lovni qabul qilsa, Yandex Pro balansidan yechish
     if user.get("yandex_driver_id"):
         await yandex_api.create_transaction(
             user["yandex_driver_id"],
@@ -2315,7 +2298,6 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
             f"Kapitalbank to'lovi #{w_id} ({mask_card(card_num)})"
         )
 
-    # 3. Statusni yangilash
     await db_update_withdrawal_status(w_id, "completed", ext_tx_id=tx_id)
 
     try:
@@ -2830,6 +2812,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
         return
 
     pending_yandex_ids = await db_get_pending_yandex_ids()
+    inserted_count = 0
     updated_count = 0
     now = tashkent_now_iso()
 
@@ -2846,53 +2829,91 @@ async def admin_sync_all_drivers(message: Message) -> None:
 
         p_clean = clean_phone_number(phone) if phone else ""
 
-        if y_id in pending_yandex_ids:
+        # Bazada borligini tekshirish
+        existing_user = None
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id, balance, position FROM users WHERE yandex_driver_id=$1 OR (phone=$2 AND phone != '')",
+                    y_id, p_clean
+                )
+                existing_user = dict(row) if row else None
+        else:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT id, balance, position FROM users WHERE yandex_driver_id=? OR (phone=? AND phone != '')",
+                (y_id, p_clean)
+            ).fetchone()
+            existing_user = dict(row) if row else None
+            conn.close()
+
+        if existing_user:
+            # Mavjud haydovchini yangilash
+            u_id = existing_user["id"]
+            if y_id in pending_yandex_ids:
+                if db_pool:
+                    async with db_pool.acquire() as conn:
+                        await conn.execute(
+                            """UPDATE users SET full_name=$1, car_model=$2, car_number=$3, updated_at=$4
+                            WHERE id=$5""", full_name, car_model, car_num, now, u_id
+                        )
+                else:
+                    conn = sqlite3.connect(DB_PATH, timeout=10)
+                    with conn:
+                        conn.execute(
+                            """UPDATE users SET full_name=?, car_model=?, car_number=?, updated_at=?
+                            WHERE id=?""", (full_name, car_model, car_num, now, u_id)
+                        )
+                    conn.close()
+            else:
+                if db_pool:
+                    async with db_pool.acquire() as conn:
+                        await conn.execute(
+                            """UPDATE users SET 
+                                full_name=$1, car_model=$2, car_number=$3, 
+                                balance=$4, yandex_driver_id=$5, updated_at=$6 
+                            WHERE id=$7""", full_name, car_model, car_num, bal, y_id, now, u_id
+                        )
+                else:
+                    conn = sqlite3.connect(DB_PATH, timeout=10)
+                    with conn:
+                        conn.execute(
+                            """UPDATE users SET 
+                                full_name=?, car_model=?, car_number=?, 
+                                balance=?, yandex_driver_id=?, updated_at=? 
+                            WHERE id=?""", (full_name, car_model, car_num, bal, y_id, now, u_id)
+                        )
+                    conn.close()
+            updated_count += 1
+        else:
+            # Yangi haydovchi bo'lsa BAZAGA QO'SHISH (INSERT)
+            new_pos = await db_generate_unique_position()
             if db_pool:
                 async with db_pool.acquire() as conn:
                     await conn.execute(
-                        """UPDATE users SET full_name=$1, car_model=$2, car_number=$3, updated_at=$4
-                        WHERE yandex_driver_id=$5 OR phone=$6""",
-                        full_name, car_model, car_num, now, y_id, p_clean,
+                        """INSERT INTO users 
+                            (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)""",
+                        full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now
                     )
             else:
                 conn = sqlite3.connect(DB_PATH, timeout=10)
                 with conn:
                     conn.execute(
-                        """UPDATE users SET full_name=?, car_model=?, car_number=?, updated_at=?
-                        WHERE yandex_driver_id=? OR phone=?""",
-                        (full_name, car_model, car_num, now, y_id, p_clean),
+                        """INSERT INTO users 
+                            (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                        (full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now, now)
                     )
                 conn.close()
-        else:
-            if db_pool:
-                async with db_pool.acquire() as conn:
-                    res = await conn.execute(
-                        """UPDATE users SET 
-                            full_name=$1, car_model=$2, car_number=$3, 
-                            balance=$4, yandex_driver_id=$5, updated_at=$6 
-                        WHERE (yandex_driver_id=$5 OR phone=$7) AND (balance != $4 OR car_number != $3 OR yandex_driver_id IS NULL)""",
-                        full_name, car_model, car_num, bal, y_id, now, p_clean,
-                    )
-                    if res != "UPDATE 0":
-                        updated_count += 1
-            else:
-                conn = sqlite3.connect(DB_PATH, timeout=10)
-                with conn:
-                    cur = conn.execute(
-                        """UPDATE users SET 
-                            full_name=?, car_model=?, car_number=?, 
-                            balance=?, yandex_driver_id=?, updated_at=? 
-                        WHERE (yandex_driver_id=? OR phone=?) AND (balance != ? OR car_number != ? OR yandex_driver_id IS NULL)""",
-                        (full_name, car_model, car_num, bal, y_id, now, y_id, p_clean, bal, car_num),
-                    )
-                    if cur.rowcount > 0:
-                        updated_count += 1
-                conn.close()
+            inserted_count += 1
 
     tot_drv = len(drivers)
     await status_msg.edit_text(
         f"✅ <b>Yandex sinxronlash muvaffaqiyatli yakunlandi!</b>\n\n"
         f"🚕 Jami Yandex haydovchilari: <b>{tot_drv} ta</b>\n"
+        f"🆕 Bazaga yangi kiritilganlar: <b>{inserted_count} ta</b>\n"
         f"🔄 Yangilanganlar: <b>{updated_count} ta</b>\n"
         f"🔒 Arizasi ko'rib chiqilayotganlar: <b>{len(pending_yandex_ids)} ta</b>"
     )
@@ -2922,7 +2943,7 @@ async def admin_list_drivers(message: Message) -> None:
         pass
 
     if not drivers:
-        await message.answer("Hozircha ro'yxatdan o'tgan haydovchilar yo'q.")
+        await message.answer("Hozircha ro'yxatdan o'tgan haydovchilar yo'q. '🔄 Yandex Sinxronlash' tugmasini bosing.")
         return
 
     now_iso = tashkent_now_iso()
@@ -2953,7 +2974,8 @@ async def admin_list_drivers(message: Message) -> None:
             bal_str = f"{fmt_sum(live_bal)} so'm ({st_icon})"
             has_pending = await db_has_pending_withdrawal(d_id)
             if not has_pending and int(drv.get("balance", 0) or 0) != live_bal:
-                await db_update_balance(drv["telegram_id"], live_bal)
+                if drv.get("telegram_id"):
+                    await db_update_balance(drv["telegram_id"], live_bal)
             if not y_id and y_info.get("id"):
                 if db_pool:
                     async with db_pool.acquire() as conn:
@@ -3103,7 +3125,7 @@ async def admin_inactive_drivers(message: Message) -> None:
     if db_pool:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE is_registered=1 AND (last_activity < $1 OR is_blocked=1) ORDER BY id DESC LIMIT 20",
+                "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE (is_registered=1 OR yandex_driver_id IS NOT NULL) AND (last_activity < $1 OR is_blocked=1) ORDER BY id DESC LIMIT 20",
                 ten_days_ago
             )
             inactive = [dict(r) for r in rows]
@@ -3111,7 +3133,7 @@ async def admin_inactive_drivers(message: Message) -> None:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         inactive = [dict(r) for r in conn.execute(
-            "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE is_registered=1 AND (last_activity < ? OR is_blocked=1) ORDER BY id DESC LIMIT 20",
+            "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE (is_registered=1 OR yandex_driver_id IS NOT NULL) AND (last_activity < ? OR is_blocked=1) ORDER BY id DESC LIMIT 20",
             (ten_days_ago,)
         ).fetchall()]
         conn.close()
@@ -3192,44 +3214,55 @@ async def yandex_auto_sync_scheduler():
                     if not y_id:
                         continue
 
-                    if y_id in pending_yandex_ids:
-                        if db_pool:
-                            async with db_pool.acquire() as conn:
+                    # Mavjudligini tekshirish
+                    if db_pool:
+                        async with db_pool.acquire() as conn:
+                            row = await conn.fetchrow(
+                                "SELECT id FROM users WHERE yandex_driver_id=$1 OR (phone=$2 AND phone != '')",
+                                y_id, p_clean
+                            )
+                            if row:
+                                if y_id not in pending_yandex_ids:
+                                    await conn.execute(
+                                        """UPDATE users SET 
+                                            full_name=$1, car_model=$2, car_number=$3, 
+                                            balance=$4, yandex_driver_id=$5, updated_at=$6 
+                                        WHERE id=$7""", full_name, car_model, car_num, bal, y_id, now, row["id"]
+                                    )
+                            else:
+                                new_pos = await db_generate_unique_position()
                                 await conn.execute(
-                                    """UPDATE users SET full_name=$1, car_model=$2, car_number=$3, updated_at=$4
-                                    WHERE yandex_driver_id=$5 OR phone=$6""",
-                                    full_name, car_model, car_num, now, y_id, p_clean,
+                                    """INSERT INTO users 
+                                        (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)""",
+                                    full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now
                                 )
-                        else:
-                            conn = sqlite3.connect(DB_PATH, timeout=10)
-                            with conn:
-                                conn.execute(
-                                    """UPDATE users SET full_name=?, car_model=?, car_number=?, updated_at=?
-                                    WHERE yandex_driver_id=? OR phone=?""",
-                                    (full_name, car_model, car_num, now, y_id, p_clean),
-                                )
-                            conn.close()
                     else:
-                        if db_pool:
-                            async with db_pool.acquire() as conn:
-                                await conn.execute(
-                                    """UPDATE users SET 
-                                        full_name=$1, car_model=$2, car_number=$3, 
-                                        balance=$4, yandex_driver_id=$5, updated_at=$6 
-                                    WHERE (yandex_driver_id=$5 OR phone=$7) AND (balance != $4 OR car_number != $3 OR yandex_driver_id IS NULL)""",
-                                    full_name, car_model, car_num, bal, y_id, now, p_clean,
-                                )
+                        conn = sqlite3.connect(DB_PATH, timeout=10)
+                        conn.row_factory = sqlite3.Row
+                        row = conn.execute(
+                            "SELECT id FROM users WHERE yandex_driver_id=? OR (phone=? AND phone != '')",
+                            (y_id, p_clean)
+                        ).fetchone()
+                        if row:
+                            if y_id not in pending_yandex_ids:
+                                with conn:
+                                    conn.execute(
+                                        """UPDATE users SET 
+                                            full_name=?, car_model=?, car_number=?, 
+                                            balance=?, yandex_driver_id=?, updated_at=? 
+                                        WHERE id=?""", (full_name, car_model, car_num, bal, y_id, now, row["id"])
+                                    )
                         else:
-                            conn = sqlite3.connect(DB_PATH, timeout=10)
+                            new_pos = await db_generate_unique_position()
                             with conn:
                                 conn.execute(
-                                    """UPDATE users SET 
-                                        full_name=?, car_model=?, car_number=?, 
-                                        balance=?, yandex_driver_id=?, updated_at=? 
-                                    WHERE (yandex_driver_id=? OR phone=?) AND (balance != ? OR car_number != ? OR yandex_driver_id IS NULL)""",
-                                    (full_name, car_model, car_num, bal, y_id, now, y_id, p_clean, bal, car_num),
+                                    """INSERT INTO users 
+                                        (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                                    (full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now, now)
                                 )
-                            conn.close()
+                        conn.close()
         except Exception as e:
             logger.error(f"Avtomatik fon sinxronlash xatosi: {e}")
 
