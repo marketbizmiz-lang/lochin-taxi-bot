@@ -499,7 +499,6 @@ async def db_finish_registration(
     if phone_clean == OWNER_PHONE:
         ADMIN_IDS.add(telegram_id)
 
-    # Avval position mavjudligini tekshiramiz
     existing = await db_get_user(telegram_id)
     if existing and existing.get("position"):
         position = existing["position"]
@@ -1241,7 +1240,7 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 5. KAPITALBANK INTEGRATSIYA
+# 5. KAPITALBANK INTEGRATSIYA (KUCHAYTIRILGAN)
 # ============================================================
 
 class KapitalBankAPI:
@@ -1775,7 +1774,7 @@ async def lang_callback(callback: CallbackQuery) -> None:
 
 
 # ============================================================
-# 11. RO'YXATDAN O'TISH HANDLERLARI (KUCHAYTIRILGAN)
+# 11. RO'YXATDAN O'TISH HANDLERLARI
 # ============================================================
 
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]), StateFilter("*"))
@@ -1924,7 +1923,6 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
         logger.error(f"db_finish_registration error: {e}")
         position = "LCH-AUTO"
 
-    # Haydovchiga zudlik bilan javob va menyu qaytaramiz (qotib qolmasligi uchun)
     await message.answer(t(lang, "reg_success", position=position), reply_markup=user_main_kb(lang, uid))
 
     init_bal = 0
@@ -1955,7 +1953,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     ]])
 
     for adm in ADMIN_IDS:
-        if adm != uid:  # Agar admin o'zi ro'yxatdan o'tayotgan bo'lsa, o'ziga takroriy yuborilmaydi
+        if adm != uid:
             try:
                 await bot.send_message(adm, admin_alert, reply_markup=adm_kb)
             except Exception:
@@ -2098,7 +2096,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 14. PUL YECHISH (24/7)
+# 14. PUL YECHISH (HAYDOVCHI VA ADMIN ANIQ AJRATILDI)
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -2115,8 +2113,8 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
     has_pending = await db_has_pending_withdrawal(user["id"])
     if has_pending:
         await message.answer(
-            "❌ <b>Sizda allaqachon ko'rib chiqilayotgan faol ariza mavjud!</b>\n\n"
-            "Yangi ariza berishdan oldin oldingi arizangiz tasdiqlanishini kuting.",
+            "⏳ <b>Sizda ko'rib chiqilayotgan faol ariza mavjud!</b>\n\n"
+            "Admin tasdiqlashini kuting. Tasdiqlangandan so'ng yangi ariza bera olasiz.",
             reply_markup=user_main_kb(lang, uid)
         )
         return
@@ -2175,14 +2173,14 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     await state.set_state(WithdrawStates.confirm)
 
     confirm_txt = (
-        f"💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n"
+        f"💳 <b>Pul yechish arizasini tasdiqlaysizmi?</b>\n\n"
         f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
         f"💵 Kartaga to'lanadi: <b>{fmt_sum(net)} so'm</b>\n"
         f"🔒 Depozitda qoladi: <b>{fmt_sum(rem_deposit)} so'm</b>\n"
         f"💳 Karta: <code>{masked_card_val}</code>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Tasdiqlayman", callback_data="wd_go:yes"),
+        InlineKeyboardButton(text="✅ Ha, so'rov yuborish", callback_data="wd_go:yes"),
         InlineKeyboardButton(text="❌ Bekor qilish", callback_data="wd_go:no"),
     ]])
     await message.answer(confirm_txt, reply_markup=kb)
@@ -2225,14 +2223,15 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         return
 
     masked_c = mask_card(full_card)
+    # HAYDOVCHIGA FAQAT SHU XABAR CHIQADI (Bankka so'rov hali bormaydi!)
     await callback.message.edit_text(
-        f"✅ <b>Pul yechish arizangiz qabul qilindi! (Ariza #{w_id})</b>\n\n"
+        f"⏳ <b>Arizangiz qabul qilindi! (Ariza #{w_id})</b>\n\n"
         f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
         f"💵 Kartaga tushadi: <b>{fmt_sum(net_amount)} so'm</b>\n"
         f"💳 Karta: <code>{masked_c}</code>\n\n"
-        f"⏱ <i>Mablag' qisqa vaqt ichida kartangizga o'tkaziladi.</i>"
+        f"👨💻 <i>Hozirda ariza administrator tekshiruvida. Admin tasdiqlashi bilan pul kartangizga o'tkaziladi.</i>"
     )
-    await callback.answer()
+    await callback.answer("Arizangiz adminga yuborildi!")
 
     y_status_txt = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
     u_pos = user.get("position", "N/A")
@@ -2250,7 +2249,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         f"💳 <b>Karta:</b> <code>{full_card}</code> <i>(Nusxa olish uchun bosing)</i>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"💰 <b>Yechilayotgan summa:</b> {fmt_sum(amount)} so'm\n"
-        f"💵 <b>Kartaga to'lanadigan sof summa:</b> <b>{fmt_sum(net_amount)} so'm</b>\n"
+        f"💵 <b>Kartaga to'lanishi kerak:</b> <b>{fmt_sum(net_amount)} so'm</b>\n"
         f"🔒 <b>Depozitda qoladigan:</b> {fmt_sum(rem_deposit)} so'm\n"
         f"🚖 <b>Yandex Pro:</b> {y_status_txt}"
     )
@@ -2277,7 +2276,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
 
 # ============================================================
-# 15. ADMIN TASDIQLASH VA TO'LOV
+# 15. ADMIN TASDIQLASH VA TO'LOV (BANK FAQAT SHU YERDA CHAQIRILADI)
 # ============================================================
 
 @admin_router.callback_query(F.data.startswith("adm_kapital:"))
@@ -2338,7 +2337,7 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
     try:
         await bot.send_message(
             user["telegram_id"],
-            f"✅ <b>Pul yechish arizangiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
+            f"✅ <b>Tabriklaymiz! Pul yechish arizangiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
             f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> Kapitalbank orqali kartangizga muvaffaqiyatli o'tkazildi.\n"
             f"💳 Karta: <code>{mask_card(card_num)}</code>\n\n"
             f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>"
@@ -2647,7 +2646,7 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# 17. ADMIN PANEL VA YANDEX SINXRONLASH
+# 17. ADMIN PANEL
 # ============================================================
 
 @admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]), StateFilter("*"))
