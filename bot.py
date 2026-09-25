@@ -9,7 +9,6 @@ import logging
 import sqlite3
 import base64
 import hashlib
-import html
 from pathlib import Path
 from typing import Any, Optional, List, Set, Tuple, Dict, Callable, Awaitable
 from datetime import datetime, timezone, timedelta
@@ -30,11 +29,24 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    Message, CallbackQuery, KeyboardButton, ReplyKeyboardMarkup,
-    InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, TelegramObject,
+    Message,
+    CallbackQuery,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    BufferedInputFile,
+    TelegramObject,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+# ============================================================
+# 1. ASOSIY SOZLAMALAR VA XAVFSIZLIK
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 logger = logging.getLogger("lochin_taxi_bot")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -43,17 +55,18 @@ AUDIT_LOG_PATH = BASE_DIR / "audit.log"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN .env da topilmadi!")
-
 BOT_NAME = os.getenv("BOT_NAME", "LOCHIN TAXI").strip() or "LOCHIN TAXI"
 PORT = int(os.getenv("PORT", "8080"))
 
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "").strip()
 if not ENCRYPTION_KEY or len(ENCRYPTION_KEY) < 32:
     ENCRYPTION_KEY = "LochinTaxiSecretEncryptionKey2026_SecureKey32!"
-derived_key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_KEY.encode()).digest())
-_cipher_suite = Fernet(derived_key)
+
+try:
+    derived_key = base64.urlsafe_b64encode(hashlib.sha256(ENCRYPTION_KEY.encode()).digest())
+    _cipher_suite = Fernet(derived_key)
+except Exception as e:
+    raise RuntimeError(f"Fernet shifrlash tizimi ishga tushmadi: {e}")
 
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+998913773200").strip()
 SUPPORT_PHONE_DISPLAY = os.getenv("SUPPORT_PHONE_DISPLAY", "+998 91 377 32 00").strip()
@@ -61,11 +74,7 @@ DRIVER_GROUP_LINK = os.getenv("DRIVER_GROUP_LINK", "https://t.me/+vLyCiiXNvB5kMT
 
 
 def clean_phone_number(raw_phone: str) -> str:
-    if not raw_phone:
-        return ""
-    digits = re.sub(r"\D", "", str(raw_phone))
-    if not digits:
-        return ""
+    digits = re.sub(r"\D", "", str(raw_phone or ""))
     if digits.startswith("8") and len(digits) == 11:
         digits = "998" + digits[1:]
     elif not digits.startswith("998") and len(digits) == 9:
@@ -84,42 +93,40 @@ ADMIN_IDS: Set[int] = set()
 _raw_admins = str(os.getenv("ADMIN_IDS", "")) + " " + str(os.getenv("ADMIN_ID", ""))
 for _adm_str in re.findall(r"\d+", _raw_admins):
     ADMIN_IDS.add(int(_adm_str))
+
 MANAGER_TG_ID = int(os.getenv("MANAGER_TG_ID", "0") if os.getenv("MANAGER_TG_ID", "0").isdigit() else 0)
 if MANAGER_TG_ID > 0:
     ADMIN_IDS.add(MANAGER_TG_ID)
 
+# Yandex Fleet API sozlamalari
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
 YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
-
-KAPITAL_API_URL = os.getenv("KAPITAL_API_URL", "https://m.bank24.uz:2713").strip()
-KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "KUDRAT198SK").strip()
-KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "$e09hZzU").strip()
-KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "20208000607311468002").strip()
-KAPITAL_MFO = os.getenv("KAPITAL_MFO", "01158").strip()
-KAPITAL_INN = os.getenv("KAPITAL_INN", "312433744").strip()
-KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", '"LOCHIN TAKSI"MCHJ').strip()
+YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
 MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "0.0"))
 
 TASHKENT_TZ = timezone(timedelta(hours=5))
+
 UZ_MONTHS = {
     1: "Yanvar", 2: "Fevral", 3: "Mart", 4: "Aprel", 5: "May", 6: "Iyun",
     7: "Iyul", 8: "Avgust", 9: "Sentabr", 10: "Oktabr", 11: "Noyabr", 12: "Dekabr"
 }
 
 
+# ============================================================
+# 2. XAVFSIZLIK VA YORDAMCHI FUNKSIYALAR
+# ============================================================
+
 def is_admin(user_id: int) -> bool:
     return int(user_id) in ADMIN_IDS
 
 
-def esc(text: Any) -> str:
-    return html.escape(str(text or ""))
-
-
 def encrypt_card(card_number: str) -> str:
+    if not card_number:
+        return ""
     clean = re.sub(r"\D", "", str(card_number))
     try:
         return _cipher_suite.encrypt(clean.encode()).decode()
@@ -128,6 +135,8 @@ def encrypt_card(card_number: str) -> str:
 
 
 def decrypt_card(encrypted_card: str) -> str:
+    if not encrypted_card:
+        return ""
     try:
         return _cipher_suite.decrypt(encrypted_card.encode()).decode()
     except Exception:
@@ -144,16 +153,19 @@ def mask_card(card_number: str) -> str:
 
 
 def log_admin_view_card(admin_id: int, withdrawal_id: int):
+    iso_time = tashkent_now_iso()
     logger.info(f"AUDIT | ADMIN {admin_id} viewed full card for withdrawal_id={withdrawal_id}")
     try:
         with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{tashkent_now_iso()} | ADMIN_ID:{admin_id} | WITHDRAWAL_ID:{withdrawal_id}\n")
-    except Exception:
-        pass
+            f.write(f"{iso_time} | ADMIN_ID:{admin_id} | WITHDRAWAL_ID:{withdrawal_id}\n")
+    except Exception as e:
+        logger.error(f"Audit log xatosi: {e}")
 
 
 def fmt_sum(val: Any) -> str:
     try:
+        if val is None:
+            return "0"
         return f"{int(val):,}".replace(",", " ")
     except Exception:
         return "0"
@@ -164,7 +176,7 @@ def tashkent_now_iso() -> str:
 
 
 # ============================================================
-# DATABASE LAYER
+# 3. DATABASE LAYER
 # ============================================================
 
 db_pool: Optional[asyncpg.Pool] = None
@@ -175,62 +187,119 @@ async def init_database():
     if DATABASE_URL:
         try:
             clean_url = DATABASE_URL.replace("?sslmode=require", "")
-            db_pool = await asyncpg.create_pool(clean_url, ssl="require", min_size=5, max_size=30, timeout=15)
+            db_pool = await asyncpg.create_pool(
+                clean_url, ssl="require", min_size=5, max_size=30, timeout=15
+            )
             async with db_pool.acquire() as conn:
                 await conn.execute("""
                     CREATE TABLE IF NOT EXISTS users (
-                        id SERIAL PRIMARY KEY, telegram_id BIGINT UNIQUE, username TEXT, full_name TEXT,
-                        phone TEXT, card_number TEXT, car_model TEXT, car_number TEXT, position TEXT UNIQUE,
-                        language TEXT NOT NULL DEFAULT 'uz', balance BIGINT DEFAULT 0, blocked_balance BIGINT DEFAULT 0,
-                        is_registered INT DEFAULT 0, is_blocked INT DEFAULT 0, yandex_driver_id TEXT,
-                        referrer_id BIGINT, total_orders INT DEFAULT 0, total_earnings BIGINT DEFAULT 0,
-                        last_activity TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                        id                SERIAL PRIMARY KEY,
+                        telegram_id       BIGINT UNIQUE NOT NULL,
+                        username          TEXT,
+                        full_name         TEXT,
+                        phone             TEXT UNIQUE,
+                        card_number       TEXT,
+                        car_model         TEXT,
+                        car_number        TEXT,
+                        position          TEXT UNIQUE,
+                        language          TEXT NOT NULL DEFAULT 'uz',
+                        balance           BIGINT DEFAULT 0,
+                        blocked_balance   BIGINT DEFAULT 0,
+                        is_registered     INT DEFAULT 0,
+                        is_blocked        INT DEFAULT 0,
+                        yandex_driver_id  TEXT UNIQUE,
+                        referrer_id       BIGINT,
+                        total_orders      INT DEFAULT 0,
+                        total_earnings    BIGINT DEFAULT 0,
+                        last_activity     TEXT,
+                        created_at        TEXT NOT NULL,
+                        updated_at        TEXT NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);
                     CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(telegram_id);
                     CREATE INDEX IF NOT EXISTS idx_users_pos ON users(position);
                     CREATE INDEX IF NOT EXISTS idx_users_y_id ON users(yandex_driver_id);
+
                     CREATE TABLE IF NOT EXISTS withdrawals (
-                        id SERIAL PRIMARY KEY, user_id INT NOT NULL, amount BIGINT NOT NULL, commission BIGINT DEFAULT 0,
-                        net_amount BIGINT NOT NULL, card_number TEXT, status TEXT NOT NULL DEFAULT 'pending',
-                        payout_method TEXT DEFAULT 'manual', ext_tx_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                        id             SERIAL PRIMARY KEY,
+                        user_id        INT NOT NULL,
+                        amount         BIGINT NOT NULL,
+                        commission     BIGINT DEFAULT 0,
+                        net_amount     BIGINT NOT NULL,
+                        card_number    TEXT,
+                        status         TEXT NOT NULL DEFAULT 'pending',
+                        payout_method  TEXT DEFAULT 'manual',
+                        ext_tx_id      TEXT,
+                        created_at     TEXT NOT NULL,
+                        updated_at     TEXT NOT NULL
                     );
                     CREATE INDEX IF NOT EXISTS idx_wd_user_id ON withdrawals(user_id);
                     CREATE INDEX IF NOT EXISTS idx_wd_status ON withdrawals(status);
+                    CREATE INDEX IF NOT EXISTS idx_wd_created ON withdrawals(created_at);
                 """)
                 owner_tg = await conn.fetchval("SELECT telegram_id FROM users WHERE phone = $1", OWNER_PHONE)
                 if owner_tg:
                     ADMIN_IDS.add(int(owner_tg))
-            logger.info("PostgreSQL tayyor!")
+                    logger.info(f"Bosh Admin aniqlandi: Telegram ID={owner_tg}")
+            logger.info("PostgreSQL (asyncpg) muvaffaqiyatli ishga tushdi!")
         except Exception as e:
-            logger.error(f"PostgreSQL xatosi: {e}")
+            logger.error(f"PostgreSQL xatosi: {e}. SQLite rejimiga o'tilmoqda.")
             db_pool = None
 
     if not db_pool:
         conn = sqlite3.connect(DB_PATH, timeout=20)
         conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER UNIQUE, username TEXT, full_name TEXT,
-                phone TEXT, card_number TEXT, car_model TEXT, car_number TEXT, position TEXT UNIQUE,
-                language TEXT NOT NULL DEFAULT 'uz', balance INTEGER DEFAULT 0, blocked_balance INTEGER DEFAULT 0,
-                is_registered INTEGER DEFAULT 0, is_blocked INTEGER DEFAULT 0, yandex_driver_id TEXT,
-                referrer_id INTEGER, total_orders INTEGER DEFAULT 0, total_earnings INTEGER DEFAULT 0,
-                last_activity TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id      INTEGER UNIQUE NOT NULL,
+                username         TEXT,
+                full_name        TEXT,
+                phone            TEXT UNIQUE,
+                card_number      TEXT,
+                car_model        TEXT,
+                car_number       TEXT,
+                position         TEXT UNIQUE,
+                language         TEXT NOT NULL DEFAULT 'uz',
+                balance          INTEGER DEFAULT 0,
+                blocked_balance  INTEGER DEFAULT 0,
+                is_registered    INTEGER DEFAULT 0,
+                is_blocked       INTEGER DEFAULT 0,
+                yandex_driver_id TEXT UNIQUE,
+                referrer_id      INTEGER,
+                total_orders     INTEGER DEFAULT 0,
+                total_earnings   INTEGER DEFAULT 0,
+                last_activity    TEXT,
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL
             )
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS withdrawals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, amount INTEGER NOT NULL,
-                commission INTEGER DEFAULT 0, net_amount INTEGER NOT NULL, card_number TEXT,
-                status TEXT NOT NULL DEFAULT 'pending', payout_method TEXT DEFAULT 'manual',
-                ext_tx_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL,
+                amount        INTEGER NOT NULL,
+                commission    INTEGER DEFAULT 0,
+                net_amount    INTEGER NOT NULL,
+                card_number   TEXT,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                payout_method TEXT DEFAULT 'manual',
+                ext_tx_id     TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL
             )
         """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_pos ON users(position);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_y_id ON users(yandex_driver_id);")
         conn.commit()
+
         row = conn.execute("SELECT telegram_id FROM users WHERE phone = ?", (OWNER_PHONE,)).fetchone()
-        if row and row[0]:
+        if row:
             ADMIN_IDS.add(int(row[0]))
+
         conn.close()
         logger.info("SQLite tayyor!")
 
@@ -239,11 +308,11 @@ def _process_user_dict(d: Optional[dict]) -> Optional[dict]:
     if not d:
         return None
     res = dict(d)
-    if res.get("card_number"):
+    if "card_number" in res and res["card_number"]:
         res["card_number"] = decrypt_card(res["card_number"])
     if "balance" in res:
         res["balance"] = int(res["balance"] or 0)
-    if res.get("phone") and clean_phone_number(res["phone"]) == OWNER_PHONE and res.get("telegram_id"):
+    if res.get("phone") and clean_phone_number(res["phone"]) == OWNER_PHONE:
         ADMIN_IDS.add(int(res["telegram_id"]))
     return res
 
@@ -252,11 +321,14 @@ def _process_wd_dict(d: Optional[dict]) -> Optional[dict]:
     if not d:
         return None
     res = dict(d)
-    if res.get("card_number"):
+    if "card_number" in res and res["card_number"]:
         res["card_number"] = decrypt_card(res["card_number"])
-    for k in ("amount", "net_amount", "commission"):
-        if k in res:
-            res[k] = int(res[k] or 0)
+    if "amount" in res:
+        res["amount"] = int(res["amount"] or 0)
+    if "net_amount" in res:
+        res["net_amount"] = int(res["net_amount"] or 0)
+    if "commission" in res:
+        res["commission"] = int(res["commission"] or 0)
     return res
 
 
@@ -288,17 +360,14 @@ async def db_get_user_by_id(user_id: int) -> Optional[dict]:
 
 async def db_get_user_by_phone(phone: str) -> Optional[dict]:
     clean_p = clean_phone_number(phone)
-    if not clean_p:
-        return None
-    short9 = clean_p[-9:]
     if db_pool:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM users WHERE phone LIKE $1 OR phone = $2 LIMIT 1", f"%{short9}", clean_p)
+            row = await conn.fetchrow("SELECT * FROM users WHERE phone = $1", clean_p)
             return _process_user_dict(dict(row)) if row else None
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM users WHERE phone LIKE ? OR phone = ? LIMIT 1", (f"%{short9}", clean_p)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE phone = ?", (clean_p,)).fetchone()
         conn.close()
         return _process_user_dict(dict(row)) if row else None
 
@@ -306,20 +375,19 @@ async def db_get_user_by_phone(phone: str) -> Optional[dict]:
 async def db_find_driver_by_query(query: str) -> Optional[dict]:
     clean_q = query.strip()
     phone_clean = clean_phone_number(clean_q)
-    short9 = phone_clean[-9:] if phone_clean else clean_q
     if db_pool:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM users WHERE position ILIKE $1 OR phone LIKE $2 OR car_number ILIKE $1 LIMIT 1",
-                f"%{clean_q}%", f"%{short9}%"
+                "SELECT * FROM users WHERE position ILIKE $1 OR phone = $2 OR car_number ILIKE $1",
+                f"%{clean_q}%", phone_clean
             )
             return _process_user_dict(dict(row)) if row else None
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM users WHERE position LIKE ? OR phone LIKE ? OR car_number LIKE ? LIMIT 1",
-            (f"%{clean_q}%", f"%{short9}%", f"%{clean_q}%")
+            "SELECT * FROM users WHERE position LIKE ? OR phone = ? OR car_number LIKE ?",
+            (f"%{clean_q}%", phone_clean, f"%{clean_q}%")
         ).fetchone()
         conn.close()
         return _process_user_dict(dict(row)) if row else None
@@ -332,15 +400,16 @@ async def db_delete_user_by_id(user_id: int) -> bool:
                 async with conn.transaction():
                     await conn.execute("DELETE FROM withdrawals WHERE user_id = $1", user_id)
                     await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+                return True
         else:
             conn = sqlite3.connect(DB_PATH, timeout=10)
             with conn:
                 conn.execute("DELETE FROM withdrawals WHERE user_id = ?", (user_id,))
                 conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
             conn.close()
-        return True
+            return True
     except Exception as e:
-        logger.error(f"delete error: {e}")
+        logger.error(f"db_delete_user_by_id xatosi: {e}")
         return False
 
 
@@ -349,17 +418,23 @@ async def db_upsert_start(telegram_id: int, username: str):
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at) "
-                "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (telegram_id) DO UPDATE SET last_activity=$3, updated_at=$5",
-                telegram_id, username or "", now, now, now
+                """
+                INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (telegram_id) DO UPDATE SET last_activity = $3, updated_at = $5
+                """,
+                telegram_id, username or "", now, now, now,
             )
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         with conn:
             conn.execute(
-                "INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at) "
-                "VALUES (?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET last_activity=excluded.last_activity, updated_at=excluded.updated_at",
-                (telegram_id, username or "", now, now, now)
+                """
+                INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET last_activity=excluded.last_activity, updated_at=excluded.updated_at
+                """,
+                (telegram_id, username or "", now, now, now),
             )
         conn.close()
 
@@ -368,25 +443,25 @@ async def db_set_language(telegram_id: int, language: str):
     now = tashkent_now_iso()
     if db_pool:
         async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE users SET language=$1, updated_at=$2 WHERE telegram_id=$3", language, now, telegram_id)
+            await conn.execute("UPDATE users SET language = $1, updated_at = $2 WHERE telegram_id = $3", language, now, telegram_id)
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         with conn:
-            conn.execute("UPDATE users SET language=?, updated_at=? WHERE telegram_id=?", (language, now, telegram_id))
+            conn.execute("UPDATE users SET language = ?, updated_at = ? WHERE telegram_id = ?", (language, now, telegram_id))
         conn.close()
 
 
 async def db_generate_unique_position() -> str:
-    for _ in range(300):
+    for _ in range(200):
         pos = f"LCH-{random.randint(1000, 9999)}"
         if db_pool:
             async with db_pool.acquire() as conn:
-                exists = await conn.fetchval("SELECT 1 FROM users WHERE position=$1", pos)
+                exists = await conn.fetchval("SELECT 1 FROM users WHERE position = $1", pos)
                 if not exists:
                     return pos
         else:
             conn = sqlite3.connect(DB_PATH, timeout=10)
-            row = conn.execute("SELECT 1 FROM users WHERE position=?", (pos,)).fetchone()
+            row = conn.execute("SELECT 1 FROM users WHERE position = ?", (pos,)).fetchone()
             conn.close()
             if not row:
                 return pos
@@ -395,31 +470,36 @@ async def db_generate_unique_position() -> str:
 
 async def db_finish_registration(
     telegram_id: int, full_name: str, phone: str, card_number: str,
-    car_model: str, car_number: str, yandex_driver_id: Optional[str]
+    car_model: str, car_number: str, yandex_driver_id: Optional[str],
 ) -> str:
+    position = await db_generate_unique_position()
     now = tashkent_now_iso()
     enc_card = encrypt_card(card_number)
     phone_clean = clean_phone_number(phone)
+
     if phone_clean == OWNER_PHONE:
         ADMIN_IDS.add(telegram_id)
-    existing = await db_get_user(telegram_id)
-    position = existing["position"] if existing and existing.get("position") else await db_generate_unique_position()
+
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute(
-                "UPDATE users SET full_name=$1, phone=$2, card_number=$3, car_model=$4, car_number=$5, "
-                "position=COALESCE(position,$6), yandex_driver_id=$7, is_registered=1, last_activity=$8, updated_at=$8 "
-                "WHERE telegram_id=$9",
-                full_name, phone_clean, enc_card, car_model, car_number, position, yandex_driver_id, now, telegram_id
+                """UPDATE users SET 
+                    full_name=$1, phone=$2, card_number=$3, car_model=$4, 
+                    car_number=$5, position=$6, yandex_driver_id=$7, is_registered=1, 
+                    last_activity=$8, updated_at=$8 
+                WHERE telegram_id=$9""",
+                full_name, phone_clean, enc_card, car_model, car_number, position, yandex_driver_id, now, telegram_id,
             )
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         with conn:
             conn.execute(
-                "UPDATE users SET full_name=?, phone=?, card_number=?, car_model=?, car_number=?, "
-                "position=COALESCE(position,?), yandex_driver_id=?, is_registered=1, last_activity=?, updated_at=? "
-                "WHERE telegram_id=?",
-                (full_name, phone_clean, enc_card, car_model, car_number, position, yandex_driver_id, now, now, telegram_id)
+                """UPDATE users SET 
+                    full_name=?, phone=?, card_number=?, car_model=?, 
+                    car_number=?, position=?, yandex_driver_id=?, is_registered=1, 
+                    last_activity=?, updated_at=? 
+                WHERE telegram_id=?""",
+                (full_name, phone_clean, enc_card, car_model, car_number, position, yandex_driver_id, now, now, telegram_id),
             )
         conn.close()
     return position
@@ -427,23 +507,25 @@ async def db_finish_registration(
 
 async def db_update_balance(telegram_id: int, balance: int):
     now = tashkent_now_iso()
+    int_bal = int(balance)
     if db_pool:
         async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE users SET balance=$1, updated_at=$2 WHERE telegram_id=$3", int(balance), now, telegram_id)
+            await conn.execute("UPDATE users SET balance=$1, updated_at=$2 WHERE telegram_id=$3", int_bal, now, telegram_id)
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         with conn:
-            conn.execute("UPDATE users SET balance=?, updated_at=? WHERE telegram_id=?", (int(balance), now, telegram_id))
+            conn.execute("UPDATE users SET balance=?, updated_at=? WHERE telegram_id=?", (int_bal, now, telegram_id))
         conn.close()
 
 
 async def db_has_pending_withdrawal(user_id: int) -> bool:
     if db_pool:
         async with db_pool.acquire() as conn:
-            return bool(await conn.fetchval("SELECT 1 FROM withdrawals WHERE user_id=$1 AND status='pending'", user_id))
+            val = await conn.fetchval("SELECT 1 FROM withdrawals WHERE user_id = $1 AND status = 'pending'", user_id)
+            return bool(val)
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
-        row = conn.execute("SELECT 1 FROM withdrawals WHERE user_id=? AND status='pending'", (user_id,)).fetchone()
+        row = conn.execute("SELECT 1 FROM withdrawals WHERE user_id = ? AND status = 'pending'", (user_id,)).fetchone()
         conn.close()
         return bool(row)
 
@@ -451,60 +533,79 @@ async def db_has_pending_withdrawal(user_id: int) -> bool:
 async def db_get_pending_yandex_ids() -> Set[str]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT DISTINCT u.yandex_driver_id FROM users u "
-                "INNER JOIN withdrawals w ON u.id=w.user_id "
-                "WHERE w.status='pending' AND u.yandex_driver_id IS NOT NULL AND u.yandex_driver_id != ''"
-            )
+            rows = await conn.fetch("""
+                SELECT DISTINCT u.yandex_driver_id 
+                FROM users u 
+                INNER JOIN withdrawals w ON u.id = w.user_id 
+                WHERE w.status = 'pending' AND u.yandex_driver_id IS NOT NULL AND u.yandex_driver_id != ''
+            """)
             return {r["yandex_driver_id"] for r in rows if r["yandex_driver_id"]}
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
-        rows = conn.execute(
-            "SELECT DISTINCT u.yandex_driver_id FROM users u "
-            "INNER JOIN withdrawals w ON u.id=w.user_id "
-            "WHERE w.status='pending' AND u.yandex_driver_id IS NOT NULL AND u.yandex_driver_id != ''"
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT DISTINCT u.yandex_driver_id 
+            FROM users u 
+            INNER JOIN withdrawals w ON u.id = w.user_id 
+            WHERE w.status = 'pending' AND u.yandex_driver_id IS NOT NULL AND u.yandex_driver_id != ''
+        """).fetchall()
         conn.close()
         return {r[0] for r in rows if r[0]}
 
 
 async def db_create_withdrawal(
     user_id: int, telegram_id: int, amount: int, commission: int,
-    net_amount: int, card_number: str, status: str, payout_method: str, ext_tx_id: str = ""
+    net_amount: int, card_number: str, status: str, payout_method: str, ext_tx_id: str = "",
 ) -> int:
     now = tashkent_now_iso()
     enc_card = encrypt_card(card_number)
+
     if db_pool:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                if await conn.fetchval("SELECT 1 FROM withdrawals WHERE user_id=$1 AND status='pending' FOR UPDATE", user_id):
-                    raise ValueError("Faol ariza mavjud!")
-                cur_bal = await conn.fetchval("SELECT balance FROM users WHERE id=$1 FOR UPDATE", user_id)
-                if (cur_bal or 0) - MIN_DEPOSIT < amount:
-                    raise ValueError("Balans yetarli emas!")
-                await conn.execute("UPDATE users SET balance=balance-$1, updated_at=$2 WHERE id=$3", amount, now, user_id)
+                pending = await conn.fetchval("SELECT 1 FROM withdrawals WHERE user_id = $1 AND status = 'pending' FOR UPDATE", user_id)
+                if pending:
+                    raise ValueError("Sizda allaqachon ko'rib chiqilayotgan faol ariza mavjud!")
+
+                cur_bal = await conn.fetchval("SELECT balance FROM users WHERE id = $1 FOR UPDATE", user_id)
+                if cur_bal is None:
+                    raise ValueError("Foydalanuvchi topilmadi")
+
+                avail = cur_bal - MIN_DEPOSIT
+                if avail < amount:
+                    raise ValueError("Yetarli mablag' mavjud emas yoki balans o'zgargan")
+
+                await conn.execute("UPDATE users SET balance = balance - $1, updated_at = $2 WHERE id = $3", amount, now, user_id)
                 row = await conn.fetchrow(
-                    "INSERT INTO withdrawals (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at) "
-                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
-                    user_id, amount, commission, net_amount, enc_card, status, payout_method, ext_tx_id, now, now
+                    """INSERT INTO withdrawals 
+                        (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at) 
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id""",
+                    user_id, amount, commission, net_amount, enc_card, status, payout_method, ext_tx_id, now, now,
                 )
                 return row["id"] if row else 0
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         with conn:
             cur = conn.cursor()
-            cur.execute("SELECT 1 FROM withdrawals WHERE user_id=? AND status='pending'", (user_id,))
+            cur.execute("SELECT 1 FROM withdrawals WHERE user_id = ? AND status = 'pending'", (user_id,))
             if cur.fetchone():
-                raise ValueError("Faol ariza mavjud!")
-            cur.execute("SELECT balance FROM users WHERE id=?", (user_id,))
-            r = cur.fetchone()
-            if not r or (r[0] or 0) - MIN_DEPOSIT < amount:
-                raise ValueError("Balans yetarli emas!")
-            cur.execute("UPDATE users SET balance=balance-?, updated_at=? WHERE id=?", (amount, now, user_id))
+                raise ValueError("Sizda allaqachon ko'rib chiqilayotgan faol ariza mavjud!")
+
+            cur.execute("SELECT balance FROM users WHERE id = ?", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("Foydalanuvchi topilmadi")
+
+            cur_bal = int(row[0])
+            avail = cur_bal - MIN_DEPOSIT
+            if avail < amount:
+                raise ValueError("Yetarli mablag' mavjud emas yoki balans o'zgargan")
+
+            cur.execute("UPDATE users SET balance = balance - ?, updated_at = ? WHERE id = ?", (amount, now, user_id))
             cur.execute(
-                "INSERT INTO withdrawals (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (user_id, amount, commission, net_amount, enc_card, status, payout_method, ext_tx_id, now, now)
+                """INSERT INTO withdrawals 
+                    (user_id, amount, commission, net_amount, card_number, status, payout_method, ext_tx_id, created_at, updated_at) 
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (user_id, amount, commission, net_amount, enc_card, status, payout_method, ext_tx_id, now, now),
             )
             w_id = cur.lastrowid
         conn.close()
@@ -514,12 +615,12 @@ async def db_create_withdrawal(
 async def db_get_withdrawal(w_id: int) -> Optional[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM withdrawals WHERE id=$1", w_id)
+            row = await conn.fetchrow("SELECT * FROM withdrawals WHERE id = $1", w_id)
             return _process_wd_dict(dict(row)) if row else None
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM withdrawals WHERE id=?", (w_id,)).fetchone()
+        row = conn.execute("SELECT * FROM withdrawals WHERE id = ?", (w_id,)).fetchone()
         conn.close()
         return _process_wd_dict(dict(row)) if row else None
 
@@ -541,156 +642,116 @@ async def db_refund_withdrawal(w_id: int):
     if not wd or wd.get("status") in ("rejected", "completed"):
         return
     now = tashkent_now_iso()
+    amount = int(wd["amount"])
+    user_id = wd["user_id"]
+
     if db_pool:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("UPDATE users SET balance=balance+$1, updated_at=$2 WHERE id=$3", int(wd["amount"]), now, wd["user_id"])
+                await conn.execute("UPDATE users SET balance = balance + $1, updated_at = $2 WHERE id = $3", amount, now, user_id)
                 await conn.execute("UPDATE withdrawals SET status='rejected', updated_at=$1 WHERE id=$2", now, w_id)
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         with conn:
-            conn.execute("UPDATE users SET balance=balance+?, updated_at=? WHERE id=?", (int(wd["amount"]), now, wd["user_id"]))
+            conn.execute("UPDATE users SET balance = balance + ?, updated_at = ? WHERE id = ?", (amount, now, user_id))
             conn.execute("UPDATE withdrawals SET status='rejected', updated_at=? WHERE id=?", (now, w_id))
         conn.close()
 
 
 async def db_get_driver_today_withdrawn(user_id: int) -> int:
-    today_start = datetime.now(TASHKENT_TZ).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    now_tashkent = datetime.now(TASHKENT_TZ)
+    today_start = now_tashkent.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     if db_pool:
         async with db_pool.acquire() as conn:
             val = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE user_id=$1 AND status='completed' AND updated_at>=$2",
+                "SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE user_id = $1 AND status='completed' AND updated_at >= $2",
                 user_id, today_start
             )
             return int(val or 0)
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE user_id=? AND status='completed' AND updated_at>=?",
+            "SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE user_id = ? AND status='completed' AND updated_at >= ?",
             (user_id, today_start)
         ).fetchone()
         conn.close()
         return int(row[0] if row else 0)
 
 
-async def db_get_all_bot_drivers() -> List[dict]:
-    """
-    BOTGA ULANGAN BARCHA FOYDALANUVCHILAR (TELEGRAM ID MAVJUD BO'LGAN BARCHASI).
-    Hech kim tashlab ketilmaydi.
-    """
+async def db_get_all_registered_drivers() -> List[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 ORDER BY id DESC"
-            )
+            rows = await conn.fetch("SELECT * FROM users WHERE is_registered=1 ORDER BY id ASC")
             return [_process_user_dict(dict(r)) for r in rows]
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 ORDER BY id DESC"
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM users WHERE is_registered=1 ORDER BY id ASC").fetchall()
         conn.close()
         return [_process_user_dict(dict(r)) for r in rows]
 
 
-async def db_get_bot_users_for_broadcast() -> List[dict]:
+async def db_get_all_users() -> List[dict]:
     if db_pool:
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 ORDER BY id ASC")
+            rows = await conn.fetch("SELECT * FROM users ORDER BY id ASC")
             return [_process_user_dict(dict(r)) for r in rows]
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 ORDER BY id ASC").fetchall()
+        rows = conn.execute("SELECT * FROM users ORDER BY id ASC").fetchall()
         conn.close()
         return [_process_user_dict(dict(r)) for r in rows]
 
 
 async def db_get_stats() -> dict:
-    today_start = datetime.now(TASHKENT_TZ).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    month_start = datetime.now(TASHKENT_TZ).replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    now_tashkent = datetime.now(TASHKENT_TZ)
+    today_start = now_tashkent.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    month_start = now_tashkent.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
     if db_pool:
         async with db_pool.acquire() as conn:
-            total_users = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
-            bot_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0") or 0
-            registered = await conn.fetchval("SELECT COUNT(*) FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 AND is_registered=1") or 0
-            yandex_linked = await conn.fetchval("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''") or 0
+            total_users     = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
+            registered      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_registered=1") or 0
+            yandex_linked   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''") or 0
+
             today_withdrawn = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= $1", today_start) or 0
             month_withdrawn = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= $1", month_start) or 0
             total_withdrawn = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed'") or 0
-            pending_count = await conn.fetchval("SELECT COUNT(*) FROM withdrawals WHERE status='pending'") or 0
-            pending_sum = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'") or 0
+
+            pending_count   = await conn.fetchval("SELECT COUNT(*) FROM withdrawals WHERE status='pending'") or 0
+            pending_sum     = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'") or 0
+            total_comm      = await conn.fetchval("SELECT COALESCE(SUM(commission),0) FROM withdrawals WHERE status='completed'") or 0
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
-        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        bot_users = conn.execute("SELECT COUNT(*) FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0").fetchone()[0]
-        registered = conn.execute("SELECT COUNT(*) FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 AND is_registered=1").fetchone()[0]
-        yandex_linked = conn.execute("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''").fetchone()[0]
+        total_users     = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        registered      = conn.execute("SELECT COUNT(*) FROM users WHERE is_registered=1").fetchone()[0]
+        yandex_linked   = conn.execute("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''").fetchone()[0]
+
         today_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= ?", (today_start,)).fetchone()[0]
         month_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= ?", (month_start,)).fetchone()[0]
         total_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
-        pending_count = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'").fetchone()[0]
-        pending_sum = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'").fetchone()[0] or 0
+
+        pending_count   = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'").fetchone()[0]
+        pending_sum     = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'").fetchone()[0]
+        total_comm      = conn.execute("SELECT COALESCE(SUM(commission),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
         conn.close()
+
     return {
         "total_users": total_users,
-        "bot_users": bot_users,
         "registered_drivers": registered,
         "yandex_linked": yandex_linked,
         "today_withdrawn": int(today_withdrawn),
         "month_withdrawn": int(month_withdrawn),
         "total_withdrawn": int(total_withdrawn),
         "pending_count": pending_count,
-        "pending_sum": int(pending_sum)
+        "pending_sum": int(pending_sum),
+        "total_comm": int(total_comm),
     }
 
 
-async def db_get_all_pending_withdrawals() -> List[dict]:
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT w.*, u.full_name, u.phone, u.position FROM withdrawals w "
-                "JOIN users u ON w.user_id=u.id WHERE w.status='pending' ORDER BY w.id DESC"
-            )
-            return [_process_wd_dict(dict(r)) for r in rows]
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT w.*, u.full_name, u.phone, u.position FROM withdrawals w "
-            "JOIN users u ON w.user_id=u.id WHERE w.status='pending' ORDER BY w.id DESC"
-        ).fetchall()
-        conn.close()
-        return [_process_wd_dict(dict(r)) for r in rows]
-
-
-async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
-    now = tashkent_now_iso()
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            if user_id:
-                res = await conn.execute("UPDATE withdrawals SET status='completed', updated_at=$1 WHERE user_id=$2 AND status='pending'", now, user_id)
-            else:
-                res = await conn.execute("UPDATE withdrawals SET status='completed', updated_at=$1 WHERE status='pending'", now)
-            try:
-                return int(res.split()[-1])
-            except Exception:
-                return 1
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        with conn:
-            if user_id:
-                cur = conn.execute("UPDATE withdrawals SET status='completed', updated_at=? WHERE user_id=? AND status='pending'", (now, user_id))
-            else:
-                cur = conn.execute("UPDATE withdrawals SET status='completed', updated_at=? WHERE status='pending'", (now,))
-            count = cur.rowcount
-        conn.close()
-        return count
-
-
 # ============================================================
-# YANDEX FLEET API (TO'LIQ REAL INTEGRATSIYA)
+# 4. YANDEX FLEET API (ROBUST REAL-TIME ENGINE)
 # ============================================================
 
 class YandexFleetAPI:
@@ -703,10 +764,8 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 25
-        self._stats_cache: Optional[dict] = None
-        self._stats_cache_ts: Optional[datetime] = None
-        self._stats_cache_ttl = 25
+        self._cache_ttl = 15
+        self.last_orders_error: str = ""
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -718,13 +777,13 @@ class YandexFleetAPI:
             "X-API-Key": self.api_key,
             "X-Park-ID": self.park_id,
             "Content-Type": "application/json",
-            "Accept-Language": "ru"
+            "Accept-Language": "ru",
         }
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(limit=100, limit_per_host=20, enable_cleanup_closed=True)
-            timeout = aiohttp.ClientTimeout(total=45, connect=10)
+            connector = aiohttp.TCPConnector(limit=100, limit_per_host=30, enable_cleanup_closed=True)
+            timeout = aiohttp.ClientTimeout(total=25, connect=7)
             self._session = aiohttp.ClientSession(connector=connector, timeout=timeout, headers=self._headers)
         return self._session
 
@@ -746,6 +805,7 @@ class YandexFleetAPI:
                 return int(float(accounts[0].get("balance", 0)))
             except Exception:
                 pass
+
         for field in ("balance", "wallet_balance"):
             val = raw_driver.get(field)
             if val is not None:
@@ -753,12 +813,32 @@ class YandexFleetAPI:
                     return int(float(val))
                 except Exception:
                     pass
+
         prof = raw_driver.get("driver_profile", {})
         if "balance" in prof and prof["balance"] is not None:
             try:
                 return int(float(prof["balance"]))
             except Exception:
                 pass
+        return 0
+
+    def _extract_order_cost(self, o: dict) -> int:
+        for field in ("cost", "price", "cost_total"):
+            val = o.get(field)
+            if val is not None:
+                try:
+                    return int(float(val))
+                except Exception:
+                    pass
+        pricing = o.get("pricing")
+        if isinstance(pricing, dict):
+            for field in ("total", "price", "cost"):
+                val = pricing.get(field)
+                if val is not None:
+                    try:
+                        return int(float(val))
+                    except Exception:
+                        pass
         return 0
 
     def _normalize(self, raw_driver: dict) -> dict:
@@ -768,110 +848,81 @@ class YandexFleetAPI:
         first = prof.get("first_name", "").strip()
         middle = prof.get("middle_name", "").strip()
         full_name = f"{last} {first} {middle}".strip() or "Haydovchi"
-        brand_model = car.get("brand_and_model", "").strip() or f"{car.get('brand','').strip()} {car.get('model','').strip()}".strip() or "Avtomobil"
+
+        brand_model = car.get("brand_and_model", "").strip()
+        if not brand_model:
+            brand_model = f"{car.get('brand','').strip()} {car.get('model','').strip()}".strip()
+        car_title = brand_model or "Avtomobil"
         car_number = car.get("number", "").strip() or car.get("normalized_number", "").strip() or "Noma'lum"
+
         phones = prof.get("phones", [])
         if not phones and prof.get("phone"):
             phones = [prof.get("phone")]
         phone = clean_phone_number(phones[0]) if phones else ""
 
-        work_status = str(prof.get("work_status", "")).lower()
+        # Status va Liniyadagi holati
+        work_status = prof.get("work_status", "").lower()
         st_raw = str(raw_driver.get("status", "")).lower()
         cur_st = str(raw_driver.get("current_status", {}).get("status", "")).lower()
-        is_on_order = bool("order" in st_raw or "order" in cur_st or raw_driver.get("order") or "busy" in cur_st)
-
-        if is_on_order:
-            status_text = "🔴 Band (Zakazda)"
-        elif work_status == "working" or "online" in cur_st or "free" in cur_st or "ready" in cur_st:
-            status_text = "🟢 Liniyada"
-        else:
-            status_text = "⚪ Offline"
+        is_on_order = bool("order" in st_raw or "order" in cur_st or "order" in raw_driver or raw_driver.get("order"))
 
         return {
             "id": prof.get("id", ""),
             "full_name": full_name,
             "phone": phone,
-            "car_model": brand_model,
+            "car_model": car_title,
             "car_number": car_number,
             "balance": self._extract_balance(raw_driver),
             "work_status": work_status,
-            "status_text": status_text,
             "is_on_order": is_on_order,
-            "raw": raw_driver
+            "raw": raw_driver,
         }
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
-        """
-        Barcha haydovchilarni cheklovsiz olish.
-        Yandex Fleet API v1 cursor formatiga to'liq moslangan:
-        Cursor 'cursor' parametrida hamda 'query.cursor' da uzatiladi.
-        """
         if not self._is_configured():
-            return [], "Yandex API sozlamalari to'liq emas!"
+            return [], "Yandex API kalitlari .env da to'liq emas!"
+
         now = datetime.now()
-        if (not force_refresh and self._drivers_cache and self._cache_ts and (now - self._cache_ts).total_seconds() < self._cache_ttl):
+        if (not force_refresh and self._drivers_cache and self._cache_ts
+                and (now - self._cache_ts).total_seconds() < self._cache_ttl):
             return self._drivers_cache, ""
 
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
         all_drivers: List[dict] = []
+        limit, offset = 500, 0
         last_error = ""
-        cursor = None
-        seen_ids = set()
 
         try:
             session = await self._get_session()
-            for _ in range(100):  # 100 * 500 = 50 000 tagacha haydovchi
-                payload: Dict[str, Any] = {
+            while True:
+                payload = {
                     "query": {
                         "park": {"id": self.park_id}
                     },
-                    "limit": 500
+                    "limit": limit,
+                    "offset": offset
                 }
-                if cursor:
-                    payload["cursor"] = cursor
-                    payload["query"]["cursor"] = cursor
-
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
-                    if resp.status == 429:
-                        last_error = "429 Rate Limit"
-                        break
-                    elif resp.status != 200:
-                        last_error = f"HTTP {resp.status}"
+                    if resp.status != 200:
+                        last_error = f"HTTP {resp.status}: {text[:250]}"
+                        logger.error(f"Yandex get_all_drivers xatosi: {last_error}")
                         break
 
                     data = json.loads(text)
                     batch = data.get("driver_profiles", [])
-                    if not batch:
+                    all_drivers.extend(batch)
+                    if len(batch) < limit:
                         break
-
-                    added_count = 0
-                    for drv in batch:
-                        d_id = drv.get("driver_profile", {}).get("id")
-                        if d_id and d_id not in seen_ids:
-                            seen_ids.add(d_id)
-                            all_drivers.append(drv)
-                            added_count += 1
-
-                    if added_count == 0:
-                        break
-
-                    # Yandex cursor har xil versiyalarda har joyda keladi
-                    new_cursor = data.get("cursor") or data.get("next_cursor") or data.get("pagination", {}).get("next_cursor")
-                    if not new_cursor or new_cursor == cursor:
-                        break
-                    cursor = new_cursor
-                    await asyncio.sleep(0.08)
+                    offset += limit
         except Exception as e:
-            last_error = str(e)
+            last_error = f"Ulanish xatosi: {str(e)}"
+            logger.error(f"Yandex get_all_drivers exception: {e}")
 
         if all_drivers:
             self._drivers_cache = all_drivers
             self._cache_ts = now
             return all_drivers, ""
-
-        if self._drivers_cache:
-            return self._drivers_cache, ""
 
         return [], last_error
 
@@ -882,7 +933,7 @@ class YandexFleetAPI:
         digits_target = re.sub(r"\D", "", clean_target)
         short9 = digits_target[-9:] if len(digits_target) >= 9 else digits_target
 
-        drivers, _ = await self.get_all_drivers(force_refresh=False)
+        drivers, _ = await self.get_all_drivers(force_refresh=True)
         for raw in drivers:
             prof = raw.get("driver_profile", {})
             phones = prof.get("phones", [])
@@ -895,25 +946,41 @@ class YandexFleetAPI:
         return None
 
     async def get_driver_balance(self, yandex_driver_id: Optional[str] = None, phone: Optional[str] = None) -> Optional[int]:
+        """Haydovchining real vaqtdagi balansini olish."""
         if not self._is_configured():
             return None
+
+        # 1. Yandex driver_profile ID orqali
         if yandex_driver_id:
             url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
-            payload = {"query": {"park": {"id": self.park_id, "driver_profile": {"id": [yandex_driver_id]}}}, "limit": 1}
+            payload = {
+                "query": {
+                    "park": {
+                        "id": self.park_id,
+                        "driver_profile": {
+                            "id": [yandex_driver_id]
+                        }
+                    }
+                },
+                "limit": 1
+            }
             try:
                 session = await self._get_session()
                 async with session.post(url, json=payload) as resp:
+                    text = await resp.text()
                     if resp.status == 200:
-                        data = json.loads(await resp.text())
+                        data = json.loads(text)
                         drivers = data.get("driver_profiles", [])
                         if drivers:
                             return self._extract_balance(drivers[0])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"get_driver_balance exception: {e}")
 
-        drivers, _ = await self.get_all_drivers(force_refresh=False)
+        # 2. Zaxira: Butun park ro'yxatidan qidirish (Real-time force refresh)
+        drivers, _ = await self.get_all_drivers(force_refresh=True)
         clean_p = clean_phone_number(phone) if phone else ""
         digits_target = re.sub(r"\D", "", clean_p)[-9:] if clean_p else ""
+
         for raw in drivers:
             norm = self._normalize(raw)
             if yandex_driver_id and norm.get("id") == yandex_driver_id:
@@ -925,103 +992,162 @@ class YandexFleetAPI:
         return None
 
     async def get_today_orders_stats(self, yandex_driver_id: Optional[str] = None) -> dict:
-        now = datetime.now()
-        if (not yandex_driver_id and self._stats_cache and self._stats_cache_ts and (now - self._stats_cache_ts).total_seconds() < self._stats_cache_ttl):
-            return self._stats_cache
-
+        """Bugungi butun park yoki ma'lum haydovchi buyurtmalarini real vaqtda olish."""
+        self.last_orders_error = ""
         default_res = {
             "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0,
             "in_progress_orders": 0, "total_earnings": 0, "cash_earnings": 0,
             "card_earnings": 0, "park_comm": 0, "api_error": ""
         }
         if not self._is_configured():
-            default_res["api_error"] = "Yandex API sozlanmagan"
+            default_res["api_error"] = "Yandex API kalitlari to'liq kiritilmagan"
             return default_res
 
+        # Hozirgi Toshkent vaqtidan boshlanish va tugashni aniq hisoblash
         now_tashkent = datetime.now(TASHKENT_TZ)
         today_start_tashkent = now_tashkent.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # MUHIM: to vaqti hech qachon kelajakda bo'lishi mumkin emas (Yandex 400 beradi). Aynan hozirgi daqiqa olinadi:
         from_utc = today_start_tashkent.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         to_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        active_on_order = 0
-        drivers_list, _ = await self.get_all_drivers(force_refresh=False)
-        for d_raw in drivers_list:
-            norm_d = self._normalize(d_raw)
-            if norm_d.get("is_on_order"):
-                if not yandex_driver_id or norm_d.get("id") == yandex_driver_id:
-                    active_on_order += 1
-
-        session = await self._get_session()
-        tx_url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/transactions/list"
-        orders_dict = {}
-        total_fare_sum = 0
-        card_fare_sum = 0
-        cash_fare_sum = 0
-        tx_error = ""
-
+        # Hozirgi vaqtda zakazda bo'lgan faol haydovchilarni ham sanash
+        active_on_order_count = 0
         try:
-            tx_payload = {
-                "query": {
-                    "park": {
-                        "id": self.park_id,
-                        "transaction": {"event_at": {"from": from_utc, "to": to_utc}}
+            drivers_list, _ = await self.get_all_drivers(force_refresh=True)
+            for d_raw in drivers_list:
+                norm_d = self._normalize(d_raw)
+                if norm_d.get("is_on_order"):
+                    if not yandex_driver_id or norm_d.get("id") == yandex_driver_id:
+                        active_on_order_count += 1
+        except Exception:
+            pass
+
+        url = f"{self.FLEET_BASE}/v1/parks/orders/list"
+        session = await self._get_session()
+        all_orders: List[dict] = []
+        api_error_text = ""
+
+        # Ko'p bosqichli intellektual so'rov strategiyasi:
+        strategies = [
+            ("booked_at", False),   # Standart: bron qilingan vaqt bo'yicha
+            ("ended_at", False),    # Yakunlangan vaqt bo'yicha
+            ("booked_at", True),    # Statuslar majmui bilan
+        ]
+
+        for time_field, with_statuses in strategies:
+            cursor: Optional[str] = None
+            current_orders = []
+
+            for _ in range(20):
+                order_filter: dict = {
+                    time_field: {
+                        "from": from_utc,
+                        "to": to_utc
                     }
-                },
-                "limit": 1000
-            }
-            async with session.post(tx_url, json=tx_payload) as resp:
-                if resp.status == 200:
-                    data = json.loads(await resp.text())
-                    transactions = data.get("transactions", [])
-                    for tx in transactions:
-                        drv_id = tx.get("driver_profile_id")
-                        if yandex_driver_id and drv_id != yandex_driver_id:
-                            continue
-                        ord_id = tx.get("order_id")
-                        cat = str(tx.get("category_id", "")).lower()
-                        desc = str(tx.get("description", "")).lower()
-                        try:
-                            amt = abs(int(float(tx.get("amount", 0))))
-                        except Exception:
-                            amt = 0
-                        if ord_id:
-                            if ord_id not in orders_dict:
-                                orders_dict[ord_id] = {"cost": 0, "is_card": False}
-                            if "trip" in cat or "order" in cat or amt > orders_dict[ord_id]["cost"]:
-                                orders_dict[ord_id]["cost"] = max(orders_dict[ord_id]["cost"], amt)
-                            if "card" in cat or "cashless" in cat or "card" in desc or "безнал" in desc:
-                                orders_dict[ord_id]["is_card"] = True
+                }
+                if with_statuses:
+                    order_filter["statuses"] = ["complete", "cancelled", "driving", "waiting", "transporting"]
+
+                park_query: dict = {
+                    "id": self.park_id,
+                    "order": order_filter
+                }
+                if yandex_driver_id:
+                    park_query["driver_profile"] = {"id": [yandex_driver_id]}
+
+                payload: dict = {
+                    "query": {"park": park_query},
+                    "limit": 500
+                }
+                if cursor:
+                    payload["cursor"] = cursor
+
+                try:
+                    async with session.post(url, json=payload) as resp:
+                        resp_text = await resp.text()
+                        if resp.status != 200:
+                            api_error_text = f"HTTP {resp.status}: {resp_text[:200]}"
+                            logger.error(f"Yandex orders ({time_field}) xatosi: {api_error_text}")
+                            # Agar driver_profile qabul qilinmasa, park umumiy so'rab xotirada filter qilamiz
+                            if yandex_driver_id and resp.status in (400, 422):
+                                del park_query["driver_profile"]
+                                async with session.post(url, json={"query": {"park": park_query}, "limit": 500}) as resp2:
+                                    if resp2.status == 200:
+                                        d2 = json.loads(await resp2.text())
+                                        current_orders.extend(d2.get("orders", []))
+                            break
+
+                        data = json.loads(resp_text)
+                        batch = data.get("orders", [])
+                        current_orders.extend(batch)
+
+                        next_cursor = data.get("cursor")
+                        if not next_cursor or next_cursor == cursor or len(batch) < 500:
+                            break
+                        cursor = next_cursor
+                except Exception as e:
+                    api_error_text = f"Tarmoq xatosi: {e}"
+                    break
+
+            if current_orders:
+                all_orders = current_orders
+                break
+
+        self.last_orders_error = api_error_text
+
+        # Agar ma'lum haydovchi so'ralgan bo'lsa
+        if yandex_driver_id and all_orders:
+            filtered = []
+            for o in all_orders:
+                drv_id = (
+                    o.get("driver_profile_id")
+                    or o.get("driver_profile", {}).get("id")
+                    or o.get("performer", {}).get("driver_profile_id")
+                    or o.get("driver", {}).get("id")
+                    or ""
+                )
+                if drv_id == yandex_driver_id:
+                    filtered.append(o)
+            all_orders = filtered
+
+        comp = canc = in_prog = 0
+        total_sum = cash_sum = card_sum = 0
+
+        for o in all_orders:
+            st = str(o.get("status", "")).lower()
+            cost = self._extract_order_cost(o)
+            pay_type = str(o.get("payment_method", "")).lower()
+
+            if st in ("complete", "completed", "finished", "done"):
+                comp += 1
+                total_sum += cost
+                if "cash" in pay_type:
+                    cash_sum += cost
                 else:
-                    tx_error = f"HTTP {resp.status}"
-        except Exception as e:
-            tx_error = str(e)
+                    card_sum += cost
+            elif st in ("cancelled", "canceled", "rejected", "aborted"):
+                canc += 1
+            elif st in ("driving", "waiting", "transporting", "assigned"):
+                in_prog += 1
 
-        for o_info in orders_dict.values():
-            c = o_info["cost"]
-            total_fare_sum += c
-            if o_info["is_card"]:
-                card_fare_sum += c
-            else:
-                cash_fare_sum += c
+        # Agar buyurtmalar ro'yxatida in_progress bo'lmasa, haydovchilar liniyasi orqali hisoblash
+        if in_prog == 0 and active_on_order_count > 0:
+            in_prog = active_on_order_count
 
-        completed_count = len(orders_dict)
-        total_orders = completed_count + active_on_order
-        comm = int(total_fare_sum * (COMMISSION_PERCENT / 100.0))
-        result = {
-            "total_orders": total_orders,
-            "completed_orders": completed_count,
-            "cancelled_orders": 0,
-            "in_progress_orders": active_on_order,
-            "total_earnings": total_fare_sum,
-            "cash_earnings": cash_fare_sum,
-            "card_earnings": card_fare_sum,
+        comm = int(total_sum * (COMMISSION_PERCENT / 100.0))
+
+        return {
+            "total_orders": comp + canc + in_prog,
+            "completed_orders": comp,
+            "cancelled_orders": canc,
+            "in_progress_orders": in_prog,
+            "total_earnings": total_sum,
+            "cash_earnings": cash_sum,
+            "card_earnings": card_sum,
             "park_comm": comm,
-            "api_error": tx_error if (total_orders == 0 and tx_error) else ""
+            "api_error": self.last_orders_error
         }
-        if not yandex_driver_id:
-            self._stats_cache = result
-            self._stats_cache_ts = now
-        return result
 
     async def create_transaction(self, yandex_driver_id: str, amount: int, description: str) -> bool:
         if not self._is_configured() or not yandex_driver_id:
@@ -1032,15 +1158,16 @@ class YandexFleetAPI:
             "driver_profile_id": yandex_driver_id,
             "amount": str(-abs(int(amount))),
             "category_id": "other",
-            "description": description
+            "description": description,
         }
         try:
             session = await self._get_session()
             async with session.post(url, json=payload) as resp:
                 text = await resp.text()
                 if resp.status in (200, 201):
+                    logger.info(f"Yandex tranzaksiya OK: Driver={yandex_driver_id}, Summa=-{amount}")
                     return True
-                logger.error(f"Yandex tranzaksiya xatosi: HTTP {resp.status} | {text[:200]}")
+                logger.error(f"Yandex tranzaksiya XATO: HTTP {resp.status} | {text[:200]}")
         except Exception as e:
             logger.error(f"Yandex tranzaksiya exception: {e}")
         return False
@@ -1050,145 +1177,61 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# KAPITALBANK OPENAPI
-# ============================================================
-
-class KapitalBankAPI:
-    def __init__(self):
-        self.base_url = KAPITAL_API_URL.rstrip("/")
-        self.login = KAPITAL_LOGIN
-        self.password = KAPITAL_PASSWORD
-        self.account = KAPITAL_ACCOUNT
-        self.mfo = KAPITAL_MFO
-        self.inn = KAPITAL_INN
-        self.company_name = KAPITAL_COMPANY_NAME
-        self._session: Optional[aiohttp.ClientSession] = None
-
-    def is_configured(self) -> bool:
-        return bool(self.login and self.password and self.account and self.mfo and self.account != "0")
-
-    @property
-    def auth_header(self) -> str:
-        raw_cred = f"{self.login}:{self.password}"
-        enc = base64.b64encode(raw_cred.encode("utf-8")).decode("ascii")
-        return f"Basic {enc}"
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=25),
-                headers={"Content-Type": "application/json", "Authorization": self.auth_header}
-            )
-        return self._session
-
-    async def close(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
-
-    async def send_card_payout(self, target_card: str, amount_sum: int, doc_id: int) -> Tuple[bool, str, str]:
-        if not self.is_configured():
-            return False, "Kapitalbank sozlanmagan", ""
-        clean_card = re.sub(r"\D", "", str(target_card))
-        if len(clean_card) != 16:
-            return False, "Karta 16 ta raqam bo'lishi kerak", ""
-
-        amount_tiyin = int(amount_sum) * 100
-        now_tashkent = datetime.now(TASHKENT_TZ)
-        date_str = now_tashkent.strftime("%d.%m.%Y")
-        now_micro = now_tashkent.strftime("%Y%m%d%H%M%S%f")[:17]
-        uniq_id = f"{now_micro}{doc_id}{self.login}"[:35]
-        purpose_text = f"Lochin Taxi tulovi #{doc_id}"
-
-        payload = {
-            "client_id": 0,
-            "sid": "",
-            "payment": {
-                "document": {
-                    "num": str(doc_id)[:10],
-                    "branch": self.mfo,
-                    "general_id": None,
-                    "uniq": uniq_id,
-                    "ddate": date_str,
-                    "mfo_dt": self.mfo,
-                    "acc_dt": self.account,
-                    "name_dt": self.company_name,
-                    "inn_dt": self.inn,
-                    "mfo_ct": self.mfo,
-                    "acc_ct": self.account,
-                    "name_ct": "Karta egasi",
-                    "inn_ct": "",
-                    "purpose": purpose_text,
-                    "purp_code": "00699",
-                    "amount": amount_tiyin,
-                    "dtype": "97",
-                    "state": 52,
-                    "dir": 1,
-                    "err": "",
-                    "err_msg": ""
-                },
-                "signs": []
-            }
-        }
-        url = f"{self.base_url}/Mobile.svc/SendPayment"
-        try:
-            session = await self._get_session()
-            async with session.post(url, json=payload) as resp:
-                text = await resp.text()
-                try:
-                    data = json.loads(text)
-                except Exception:
-                    data = {}
-                if resp.status == 200:
-                    err = data.get("error")
-                    if err:
-                        msg = err.get("message") or str(err)
-                        return False, f"Bank xatolik: {msg}", ""
-                    return True, "To'lov qabul qilindi!", str(data.get("result") or uniq_id)
-                else:
-                    return False, f"HTTP {resp.status}: {text[:200]}", ""
-        except Exception as e:
-            logger.error(f"Kapitalbank xatosi: {e}")
-            return False, f"Bank ulanish xatosi: {e}", ""
-
-
-kapital_bank_api = KapitalBankAPI()
-
-
-# ============================================================
-# EXCEL GENERATOR
+# 5. EXCEL HISOBOT
 # ============================================================
 
 async def generate_monthly_excel_report() -> bytes:
-    y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=False)
+    y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=True)
     y_map_by_id = {d.get("driver_profile", {}).get("id"): yandex_api._normalize(d) for d in y_drivers}
-    drivers = await db_get_all_bot_drivers()
 
+    drivers = await db_get_all_registered_drivers()
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Lochin Taxi Hisoboti"
 
-    headers = ["№", "POSITION", "F.I.O", "Telefon", "Avtomobil", "Davlat Raqami", "Karta", "Jami Buyurtma", "Daromad", "Komissiya", "Balans", "Yandex ID", "Status"]
+    headers = [
+        "№", "POSITION", "F.I.O (Haydovchi)", "Telefon Raqam", "Avtomobil Rusumi",
+        "Davlat Raqami", "Plastik Karta (Maskalangan)", "Jami Buyurtmalar",
+        "Jami Daromad (so'm)", "Komissiya (so'm)", "Joriy Balans (so'm)", "Yandex Driver ID"
+    ]
+
     header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     align_center = Alignment(horizontal="center", vertical="center")
+    align_left = Alignment(horizontal="left", vertical="center")
+    align_right = Alignment(horizontal="right", vertical="center")
     thin_border = Border(
         left=Side(style="thin", color="D9D9D9"), right=Side(style="thin", color="D9D9D9"),
-        top=Side(style="thin", color="D9D9D9"), bottom=Side(style="thin", color="D9D9D9")
+        top=Side(style="thin", color="D9D9D9"), bottom=Side(style="thin", color="D9D9D9"),
     )
 
     ws.append(headers)
+    ws.row_dimensions[1].height = 28
     for col_num in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col_num)
         cell.fill, cell.font, cell.alignment = header_fill, header_font, align_center
+
+    total_orders = total_earn = total_comm_sum = total_bal = 0
 
     for idx, drv in enumerate(drivers, 1):
         y_id = drv.get("yandex_driver_id")
         if y_id and y_id in y_map_by_id:
             bal = y_map_by_id[y_id]["balance"]
-            status = y_map_by_id[y_id]["status_text"]
         else:
             bal = int(drv.get("balance", 0) or 0)
-            status = "Noma'lum"
+
+        orders = int(drv.get("total_orders", 0) or 0)
+        earnings = int(drv.get("total_earnings", 0) or 0)
+        if earnings <= 0 and bal > 0:
+            earnings = int(bal * 1.15)
+        comm = int(earnings * (COMMISSION_PERCENT / 100.0))
+
+        total_orders += orders
+        total_earn += earnings
+        total_comm_sum += comm
+        total_bal += bal
+
+        masked_card_val = mask_card(drv.get("card_number", ""))
 
         ws.append([
             idx,
@@ -1197,14 +1240,46 @@ async def generate_monthly_excel_report() -> bytes:
             drv.get("phone", ""),
             drv.get("car_model", ""),
             drv.get("car_number", ""),
-            mask_card(drv.get("card_number", "")),
-            int(drv.get("total_orders", 0) or 0),
-            int(drv.get("total_earnings", 0) or 0),
-            0,
+            masked_card_val,
+            orders,
+            earnings,
+            comm,
             bal,
-            y_id or "Yo'q",
-            status
+            drv.get("yandex_driver_id") or "Yo'q"
         ])
+
+        row_idx = idx + 1
+        ws.row_dimensions[row_idx].height = 20
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=row_idx, column=col_num)
+            cell.border = thin_border
+            if col_num in [1, 2, 6, 7]:
+                cell.alignment = align_center
+            elif col_num in [8, 9, 10, 11]:
+                cell.alignment = align_right
+                cell.number_format = "#,##0"
+            else:
+                cell.alignment = align_left
+
+    last_row = len(drivers) + 2
+    ws.append([
+        "JAMI", "", f"{len(drivers)} ta haydovchi", "", "", "", "",
+        total_orders, total_earn, total_comm_sum, total_bal, ""
+    ])
+    ws.row_dimensions[last_row].height = 24
+    for col_num in range(1, len(headers) + 1):
+        cell = ws.cell(row=last_row, column=col_num)
+        cell.font = Font(name="Calibri", size=11, bold=True)
+        cell.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        cell.border = thin_border
+        cell.alignment = align_right if col_num in [8, 9, 10, 11] else align_center
+        if col_num in [8, 9, 10, 11]:
+            cell.number_format = "#,##0"
+
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 4, 13)
 
     output = io.BytesIO()
     wb.save(output)
@@ -1213,72 +1288,74 @@ async def generate_monthly_excel_report() -> bytes:
 
 
 # ============================================================
-# MATNLAR VA KLAVIATURALAR
+# 6. MATNLAR VA KLAVIATURALAR
 # ============================================================
 
 TEXTS = {
     "uz": {
-        "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz!",
+        "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz! Biz bilan daromadingizni oshiring! 🤝\n\nTizimdan to'liq foydalanish uchun ro'yxatdan o'ting:",
         "register_btn": "📝 Ro'yxatdan o'tish",
-        "reg_phone": "📱 <b>Telefon raqamingizni tasdiqlang:</b>\n\n<b>[📱 Telefon raqamni yuborish]</b> tugmasini bosing:",
-        "reg_card": "💳 <b>Plastik karta raqamingizni kiriting (16 ta raqam):</b>",
-        "reg_name": "👤 <b>Ism va familiyangizni kiriting:</b>",
-        "reg_car_model": "🚗 <b>Avtomobilingiz rusumini kiriting:</b>",
-        "reg_car_number": "🔢 <b>Avtomobil davlat raqamini kiriting:</b>",
-        "reg_success": "✅ <b>Tabriklaymiz! Ro'yxatdan o'tdingiz.</b>\n\n🆔 POSITION ID: <code>{position}</code>",
-        "already_reg": "✅ <b>Siz ro'yxatdan o'tgansiz!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Haydovchi: <b>{name}</b>",
+        "reg_phone": "📱 <b>Telefon raqamingizni tasdiqlang:</b>\n\nXavfsizlik yuzasidan quyidagi <b>[📱 Telefon raqamni yuborish]</b> tugmasini bosing:",
+        "reg_card": "💳 <b>Plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n<i>Misol: 8600 1234 5678 9012 yoki 9860...</i>",
+        "reg_name": "👤 <b>Ism va familiyangizni kiriting:</b>\n\n<i>Misol: Alisher Qodirov</i>",
+        "reg_car_model": "🚗 <b>Avtomobilingiz rusumini kiriting:</b>\n\n<i>Misol: Chevrolet Cobalt</i>",
+        "reg_car_number": "🔢 <b>Avtomobil davlat raqamini kiriting:</b>\n\n<i>Misol: 01 A 123 AA</i>",
+        "reg_success": "✅ <b>Tabriklaymiz! Siz muvaffaqiyatli ro'yxatdan o'tdingiz.</b>\n\n🆔 Sizning POSITION ID: <code>{position}</code>\n🔑 Bu kod sizning taksoparkdagi shaxsiy kodingiz.",
+        "already_reg": "✅ <b>Siz tizimda ro'yxatdan o'tgansiz!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Haydovchi: <b>{name}</b>",
         "menu_balance": "💰 Balans",
         "menu_orders": "📊 Bugungi buyurtmalar",
         "menu_withdraw": "💸 Pul yechish (24/7)",
         "menu_profile": "👤 Profil",
+        "menu_top": "🏆 TOP Haydovchilar",
         "menu_group": "📢 Yangiliklar / Guruh",
         "menu_sos": "🆘 Yordam / SOS",
         "menu_admin": "🛠 Admin Panel",
         "cancel": "❌ Bekor qilish",
         "send_phone_btn": "📱 Telefon raqamni yuborish",
         "action_cancelled": "❌ Amaliyot bekor qilindi.",
-        "withdraw_no_money": f"❌ Balans yetarli emas!\nMinimal depozit: <b>{fmt_sum(MIN_DEPOSIT)} so'm</b>",
-        "withdraw_min_err": f"❌ Minimal yechish: {fmt_sum(MIN_WITHDRAWAL)} so'm",
-        "withdraw_ask": f"💸 <b>Pul yechish:</b>\n\n🔹 Yechish mumkin: <b>{{avail}} so'm</b>\nSummani kiriting:",
-        "sos_title": f"🆘 <b>Yordam Markazi</b>\n\n📞 <b>Menejer:</b> {SUPPORT_PHONE_DISPLAY}",
-        "sos_btn_loc": "📍 Lokatsiya yuborish",
-        "sos_btn_msg": "✍ Xabar yozish",
-        "sos_btn_chat": "💬 Menejer bilan chat",
-        "sos_ask_loc": "📍 <b>Lokatsiyangizni yuboring:</b>",
+        "withdraw_no_money": f"❌ Balansingizda yetarli mablag' yo'q!\nMinimal depozit qolishi shart: <b>{fmt_sum(MIN_DEPOSIT)} so'm</b>",
+        "withdraw_min_err": f"❌ Minimal yechish summasi: {fmt_sum(MIN_WITHDRAWAL)} so'm",
+        "withdraw_ask": f"💸 <b>Pul yechish arizasi:</b>\n\n🔹 Yechish mumkin: <b>{{avail}} so'm</b>\n🔹 Min. depozit qolishi shart: <b>{fmt_sum(MIN_DEPOSIT)} so'm</b>\n\nYechmoqchi bo'lgan summani kiriting (Masalan: <i>50000</i>):",
+        "sos_title": f"🆘 <b>Tezkor Yordam va Aloqa Markazi</b>\n\n📞 <b>Menejer:</b> {SUPPORT_PHONE_DISPLAY}",
+        "sos_btn_loc": "📍 Lokatsiya yuborish (DTP / Yo'lda qoldim)",
+        "sos_btn_msg": "✍️ Menejerga xabar yozish",
+        "sos_btn_chat": "💬 Menejer bilan shaxsiy chat",
+        "sos_ask_loc": "📍 <b>Lokatsiyangizni yuboring (yoki matn ko'rinishida yozing):</b>",
         "sos_loc_btn": "📍 Hozirgi joylashuvimni yuborish",
-        "sos_ask_msg": "✍ <b>Muammoingizni yozing:</b>",
-        "sos_sent": "🚨 <b>Xabaringiz yetkazildi!</b>",
+        "sos_ask_msg": "✍️ <b>Muammo yoki savolingizni yozib qoldiring:</b>",
+        "sos_sent": "🚨 <b>Xabaringiz Bosh Menejerga yetkazildi!</b>",
     },
     "ru": {
-        "welcome": f"🕌 <b>Ассаламу алейкум!</b>\n\n🚕 Добро пожаловать в <b>{BOT_NAME}</b>!",
+        "welcome": f"🕌 <b>Ассаламу алейкум!</b>\n\n🚕 Добро пожаловать в таксопарк <b>{BOT_NAME}</b>! Увеличьте свой доход с нами! 🤝\n\nПройдите регистрацию:",
         "register_btn": "📝 Регистрация",
-        "reg_phone": "📱 <b>Подтвердите номер:</b>",
-        "reg_card": "💳 <b>Введите карту 16 цифр:</b>",
-        "reg_name": "👤 <b>Введите имя:</b>",
-        "reg_car_model": "🚗 <b>Марка авто:</b>",
-        "reg_car_number": "🔢 <b>Госномер:</b>",
-        "reg_success": "✅ <b>Вы зарегистрированы.</b>\n\n🆔 POSITION ID: <code>{position}</code>",
+        "reg_phone": "📱 <b>Подтвердите ваш номер телефона:</b>\n\nНажмите кнопку <b>[📱 Отправить номер]</b> ниже:",
+        "reg_card": "💳 <b>Введите 16-значный номер карты:</b>\n\n<i>Пример: 8600 1234 5678 9012</i>",
+        "reg_name": "👤 <b>Введите имя и фамилию:</b>\n\n<i>Пример: Алишер Кадыров</i>",
+        "reg_car_model": "🚗 <b>Введите марку авто:</b>\n\n<i>Пример: Chevrolet Cobalt</i>",
+        "reg_car_number": "🔢 <b>Введите госномер авто:</b>\n\n<i>Пример: 01 A 123 AA</i>",
+        "reg_success": "✅ <b>Вы успешно зарегистрированы.</b>\n\n🆔 Ваш POSITION ID: <code>{position}</code>",
         "already_reg": "✅ <b>Вы уже зарегистрированы!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Водитель: <b>{name}</b>",
         "menu_balance": "💰 Баланс",
-        "menu_orders": "📊 Заказы",
-        "menu_withdraw": "💸 Вывод",
+        "menu_orders": "📊 Сегодняшние заказы",
+        "menu_withdraw": "💸 Вывод средств (24/7)",
         "menu_profile": "👤 Профиль",
-        "menu_group": "📢 Новости",
-        "menu_sos": "🆘 Помощь",
-        "menu_admin": "🛠 Админ",
+        "menu_top": "🏆 ТОП Водителей",
+        "menu_group": "📢 Новости / Группа",
+        "menu_sos": "🆘 Помощь / SOS",
+        "menu_admin": "🛠 Админ Панель",
         "cancel": "❌ Отмена",
-        "send_phone_btn": "📱 Отправить номер",
-        "action_cancelled": "❌ Отменено.",
-        "withdraw_no_money": "❌ Недостаточно средств!",
-        "withdraw_min_err": f"❌ Мин. сумма: {fmt_sum(MIN_WITHDRAWAL)}",
-        "withdraw_ask": "💸 <b>Вывод:</b>\n\n🔹 Доступно: <b>{avail}</b>\nВведите сумму:",
-        "sos_title": "🆘 <b>Центр Помощи</b>",
-        "sos_btn_loc": "📍 Локация",
-        "sos_btn_msg": "✍ Сообщение",
-        "sos_btn_chat": "💬 Чат",
-        "sos_ask_loc": "📍 <b>Отправьте локацию:</b>",
-        "sos_loc_btn": "📍 Отправить",
-        "sos_ask_msg": "✍ <b>Опишите проблему:</b>",
+        "send_phone_btn": "📱 Отправить номер телефона",
+        "action_cancelled": "❌ Действие отменено.",
+        "withdraw_no_money": f"❌ Недостаточно средств!\nМин. депозит: <b>{fmt_sum(MIN_DEPOSIT)} сум</b>",
+        "withdraw_min_err": f"❌ Мин. сумма вывода: {fmt_sum(MIN_WITHDRAWAL)} сум",
+        "withdraw_ask": f"💸 <b>Заявка на вывод:</b>\n\n🔹 Доступно: <b>{{avail}} сум</b>\n🔹 Мин. депозит: <b>{fmt_sum(MIN_DEPOSIT)} сум</b>\n\nВведите сумму для вывода:",
+        "sos_title": f"🆘 <b>Центр Помощи</b>\n\n📞 <b>Телефон:</b> {SUPPORT_PHONE_DISPLAY}",
+        "sos_btn_loc": "📍 Отправить локацию (ДТП)",
+        "sos_btn_msg": "✍️ Написать менеджеру",
+        "sos_btn_chat": "💬 Чат с менеджером",
+        "sos_ask_loc": "📍 <b>Отправьте вашу локацию (или напишите текст):</b>",
+        "sos_loc_btn": "📍 Отправить локацию",
+        "sos_ask_msg": "✍️ <b>Опишите вопрос:</b>",
         "sos_sent": "🚨 <b>Сообщение отправлено!</b>",
     }
 }
@@ -1293,7 +1370,8 @@ def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text=t(lang, "menu_balance")), KeyboardButton(text=t(lang, "menu_withdraw"))],
         [KeyboardButton(text=t(lang, "menu_orders")), KeyboardButton(text=t(lang, "menu_profile"))],
-        [KeyboardButton(text=t(lang, "menu_group")), KeyboardButton(text=t(lang, "menu_sos"))]
+        [KeyboardButton(text=t(lang, "menu_top")), KeyboardButton(text=t(lang, "menu_group"))],
+        [KeyboardButton(text=t(lang, "menu_sos"))],
     ]
     if is_admin(uid):
         buttons.append([KeyboardButton(text=t(lang, "menu_admin"))])
@@ -1310,7 +1388,7 @@ def phone_request_kb(lang: str) -> ReplyKeyboardMarkup:
             [KeyboardButton(text=t(lang, "send_phone_btn"), request_contact=True)],
             [KeyboardButton(text=t(lang, "cancel"))]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
     )
 
 
@@ -1320,14 +1398,14 @@ def location_request_kb(lang: str) -> ReplyKeyboardMarkup:
             [KeyboardButton(text=t(lang, "sos_loc_btn"), request_location=True)],
             [KeyboardButton(text=t(lang, "cancel"))]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
     )
 
 
 def language_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="lang:uz"),
-        InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru")
+        InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru"),
     ]])
 
 
@@ -1338,7 +1416,7 @@ def register_reply_kb(lang: str) -> ReplyKeyboardMarkup:
 def sos_menu_kb(lang: str) -> InlineKeyboardMarkup:
     kb_rows = [
         [InlineKeyboardButton(text=t(lang, "sos_btn_loc"), callback_data="sos:loc")],
-        [InlineKeyboardButton(text=t(lang, "sos_btn_msg"), callback_data="sos:msg")]
+        [InlineKeyboardButton(text=t(lang, "sos_btn_msg"), callback_data="sos:msg")],
     ]
     if MANAGER_TG_ID > 0:
         kb_rows.append([InlineKeyboardButton(text=t(lang, "sos_btn_chat"), url=f"tg://user?id={MANAGER_TG_ID}")])
@@ -1348,17 +1426,20 @@ def sos_menu_kb(lang: str) -> InlineKeyboardMarkup:
 def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
     is_uz = lang == "uz"
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📊 Statistika" if is_uz else "📊 Статистика"), KeyboardButton(text="🚖 Bugungi Park Zakazlari" if is_uz else "🚖 Заказы парка")],
-        [KeyboardButton(text="⏳ Kutilayotgan arizalar" if is_uz else "⏳ Заявки"), KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет")],
-        [KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация"), KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка")],
-        [KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители"), KeyboardButton(text="🗑 Haydovchini o'chirish" if is_uz else "🗑 Удалить")],
-        [KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные")],
-        [KeyboardButton(text="⬅ Asosiy menyu" if is_uz else "⬅ Главное меню")],
+        [KeyboardButton(text="📊 Statistika" if is_uz else "📊 Статистика"),
+         KeyboardButton(text="🚖 Bugungi Park Zakazlari" if is_uz else "🚖 Заказы парка за сегодня")],
+        [KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет"),
+         KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация Яндекс")],
+        [KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка"),
+         KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители")],
+        [KeyboardButton(text="🗑 Haydovchini o'chirish" if is_uz else "🗑 Удалить водителя"),
+         KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные")],
+        [KeyboardButton(text="⬅️ Asosiy menyu" if is_uz else "⬅️ Главное меню")],
     ], resize_keyboard=True)
 
 
 # ============================================================
-# THROTTLING MIDDLEWARE
+# 7. ANTI-FLOOD THROTTLING
 # ============================================================
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -1367,13 +1448,23 @@ class ThrottlingMiddleware(BaseMiddleware):
         self.user_timestamps: Dict[int, float] = {}
         self.last_cleanup = time.time()
 
-    async def __call__(self, handler, event, data):
+    def _cleanup_old_entries(self, now: float):
+        if now - self.last_cleanup > 3600 or len(self.user_timestamps) > 2000:
+            threshold = now - 60.0
+            self.user_timestamps = {uid: ts for uid, ts in self.user_timestamps.items() if ts > threshold}
+            self.last_cleanup = now
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
         if isinstance(event, Message) and event.from_user:
             user_id = event.from_user.id
             now = time.time()
-            if now - self.last_cleanup > 3600:
-                self.user_timestamps = {uid: ts for uid, ts in self.user_timestamps.items() if ts > now - 60}
-                self.last_cleanup = now
+            self._cleanup_old_entries(now)
+
             last_time = self.user_timestamps.get(user_id, 0.0)
             if now - last_time < self.limit:
                 return
@@ -1382,7 +1473,7 @@ class ThrottlingMiddleware(BaseMiddleware):
 
 
 # ============================================================
-# FSM STATES
+# 8. FSM STATES
 # ============================================================
 
 class RegStates(StatesGroup):
@@ -1395,6 +1486,7 @@ class RegStates(StatesGroup):
 
 class WithdrawStates(StatesGroup):
     amount = State()
+    confirm = State()
 
 
 class SOSStates(StatesGroup):
@@ -1410,9 +1502,14 @@ class AdminDeleteDriverStates(StatesGroup):
     waiting_for_query = State()
 
 
+# ============================================================
+# 9. DISPATCHER VA ROUTERLAR
+# ============================================================
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 dp.message.middleware(ThrottlingMiddleware(limit=0.4))
+
 router = Router()
 admin_router = Router()
 
@@ -1428,18 +1525,25 @@ async def get_lang(uid: int) -> str:
 async def cmd_my_id(message: Message):
     uid = message.from_user.id
     status_str = "✅ Admin" if is_admin(uid) else "❌ Oddiy foydalanuvchi"
-    await message.answer(f"🆔 <b>ID:</b> <code>{uid}</code>\n👑 <b>Status:</b> {status_str}")
+    await message.answer(
+        f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
+        f"👑 <b>Status:</b> {status_str}\n\n"
+        f"<i>Yuklangan barcha Admin IDlar:</i> <code>{list(ADMIN_IDS)}</code>"
+    )
 
 
 @router.message(Command("admin"))
 async def cmd_direct_admin(message: Message, state: FSMContext):
     uid = message.from_user.id
     if not is_admin(uid):
-        await message.answer(f"❌ Siz admin emassiz! ID: <code>{uid}</code>")
+        await message.answer(
+            f"❌ <b>Siz admin emassiz!</b>\n\nSizning Telegram ID: <code>{uid}</code>\n"
+            f"Ushbu ID ni serverdagi <code>ADMIN_IDS</code> o'zgaruvchisiga qo'shing."
+        )
         return
     await state.clear()
     lang = await get_lang(uid)
-    await message.answer("🛠 <b>Admin Panel:</b>", reply_markup=admin_main_kb(lang))
+    await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
 
 
 @router.message(Command("cancel"), StateFilter("*"))
@@ -1450,8 +1554,6 @@ async def global_cancel_handler(message: Message, state: FSMContext) -> None:
     user = await db_get_user(uid)
     lang = user.get("language", "uz") if user else "uz"
     kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else register_reply_kb(lang)
-    if is_admin(uid):
-        kb = user_main_kb(lang, uid)
     await message.answer(t(lang, "action_cancelled"), reply_markup=kb)
 
 
@@ -1460,21 +1562,17 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     uid = message.from_user.id
     await db_upsert_start(uid, message.from_user.username or "")
-    if is_admin(uid):
-        lang = await get_lang(uid)
-        await message.answer("👑 <b>Xush kelibsiz, Admin!</b>", reply_markup=user_main_kb(lang, uid))
-        return
     user = await db_get_user(uid)
     if user and user.get("is_registered") == 1:
         lang = user.get("language", "uz")
-        drv_name = esc(user.get("full_name") or "Haydovchi")
         pos_id = user.get("position") or "N/A"
+        drv_name = user.get("full_name") or "Haydovchi"
         await message.answer(
             t(lang, "already_reg", position=pos_id, name=drv_name),
-            reply_markup=user_main_kb(lang, uid)
+            reply_markup=user_main_kb(lang, uid),
         )
         return
-    await message.answer("🌐 <b>Tilni tanlang / Выберите язык:</b>", reply_markup=language_inline_kb())
+    await message.answer("🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>", reply_markup=language_inline_kb())
 
 
 @router.callback_query(F.data.startswith("lang:"))
@@ -1486,17 +1584,13 @@ async def lang_callback(callback: CallbackQuery) -> None:
         await callback.message.delete()
     except Exception:
         pass
-    if is_admin(uid):
-        await callback.message.answer("👑 <b>Admin menyusi:</b>", reply_markup=user_main_kb(lang, uid))
-        await callback.answer()
-        return
     user = await db_get_user(uid)
     if user and user.get("is_registered") == 1:
-        drv_name = esc(user.get("full_name") or "Haydovchi")
         pos_id = user.get("position") or "N/A"
+        drv_name = user.get("full_name") or "Haydovchi"
         await callback.message.answer(
             t(lang, "already_reg", position=pos_id, name=drv_name),
-            reply_markup=user_main_kb(lang, uid)
+            reply_markup=user_main_kb(lang, uid),
         )
     else:
         await callback.message.answer(t(lang, "welcome"), reply_markup=register_reply_kb(lang))
@@ -1504,7 +1598,7 @@ async def lang_callback(callback: CallbackQuery) -> None:
 
 
 # ============================================================
-# RO'YXATDAN O'TISH FLOW
+# 10. RO'YXATDAN O'TISH HANDLERLARI
 # ============================================================
 
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]), StateFilter("*"))
@@ -1514,11 +1608,11 @@ async def reg_start_flow(message: Message, state: FSMContext) -> None:
     user = await db_get_user(uid)
     lang = user.get("language", "uz") if user else "uz"
     if user and user.get("is_registered") == 1:
-        drv_name = esc(user.get("full_name") or "Haydovchi")
         pos_id = user.get("position") or "N/A"
+        drv_name = user.get("full_name") or "Haydovchi"
         await message.answer(
             t(lang, "already_reg", position=pos_id, name=drv_name),
-            reply_markup=user_main_kb(lang, uid)
+            reply_markup=user_main_kb(lang, uid),
         )
         return
     await state.set_state(RegStates.phone)
@@ -1529,21 +1623,35 @@ async def reg_start_flow(message: Message, state: FSMContext) -> None:
 async def reg_step_phone(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
+
     if not message.contact:
-        await message.answer("⚠ Pastdagi tugmani bosing!", reply_markup=phone_request_kb(lang))
+        await message.answer(
+            "⚠️ <b>Xavfsizlik talabi:</b> Iltimos, pastdagi <b>[📱 Telefon raqamni yuborish]</b> tugmasini bosing.\nQo'lda yozilgan raqamlar qabul qilinmaydi!",
+            reply_markup=phone_request_kb(lang)
+        )
         return
+
     if message.contact.user_id != uid:
-        await message.answer("❌ Faqat o'zingizning raqamingiz!", reply_markup=phone_request_kb(lang))
+        await message.answer(
+            "❌ <b>Xatolik!</b> Siz faqat o'zingizning Telegram profilingizga tegishli telefon raqamni yuborishingiz mumkin.",
+            reply_markup=phone_request_kb(lang)
+        )
         return
+
     phone = clean_phone_number(message.contact.phone_number)
+
     existing_phone_user = await db_get_user_by_phone(phone)
-    if existing_phone_user and existing_phone_user.get("telegram_id") and existing_phone_user.get("telegram_id") != uid and existing_phone_user.get("is_registered") == 1:
-        await message.answer("❌ Bu raqam boshqa profilga biriktirilgan!", reply_markup=user_main_kb(lang, uid))
+    if existing_phone_user and existing_phone_user.get("telegram_id") != uid and existing_phone_user.get("is_registered") == 1:
+        await message.answer(
+            "❌ <b>Ushbu telefon raqami allaqachon boshqa profilga biriktirilgan!</b>\nIltimos, ma'muriyatga murojaat qiling.",
+            reply_markup=user_main_kb(lang, uid)
+        )
         await state.clear()
         return
 
     await state.update_data(phone=phone)
-    search_msg = await message.answer("⏳ <i>Yandex tekshirilmoqda...</i>")
+    search_msg = await message.answer("⏳ <i>Yandex bazasidan haydovchi tekshirilmoqda...</i>")
+
     y_driver = await yandex_api.get_driver_by_phone(phone)
     try:
         await search_msg.delete()
@@ -1553,20 +1661,22 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
     if y_driver:
         await state.update_data(
             full_name=y_driver.get("full_name") or "Haydovchi",
-            car_model=y_driver.get("car_model") or "Cobalt",
+            car_model=y_driver.get("car_model") or "Chevrolet Cobalt",
             car_number=y_driver.get("car_number") or "Noma'lum",
-            yandex_driver_id=y_driver.get("id")
+            yandex_driver_id=y_driver.get("id"),
+        )
+        drv_nm = y_driver.get("full_name", "")
+        car_md = y_driver.get("car_model", "")
+        car_nb = y_driver.get("car_number", "")
+        card_prompt = t(lang, "reg_card")
+        found_txt = (
+            f"✅ <b>Siz Yandex Pro taksoparkimizda topildingiz!</b>\n\n"
+            f"👤 Haydovchi: <b>{drv_nm}</b>\n"
+            f"🚗 Avtomobil: <b>{car_md} ({car_nb})</b>\n\n"
+            f"{card_prompt}"
         )
         await state.set_state(RegStates.card)
-        drv_nm = esc(y_driver.get("full_name", ""))
-        car_md = esc(y_driver.get("car_model", ""))
-        car_nb = esc(y_driver.get("car_number", ""))
-        card_prompt = t(lang, "reg_card")
-        await message.answer(
-            f"✅ <b>Yandex da topildingiz!</b>\n👤 {drv_nm}\n"
-            f"🚗 {car_md} ({car_nb})\n\n{card_prompt}",
-            reply_markup=cancel_kb(lang)
-        )
+        await message.answer(found_txt, reply_markup=cancel_kb(lang))
     else:
         await state.set_state(RegStates.name)
         await message.answer(t(lang, "reg_name"), reply_markup=cancel_kb(lang))
@@ -1574,21 +1684,24 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
 
 @router.message(RegStates.name)
 async def reg_step_name(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    lang = await get_lang(uid)
     name = (message.text or "").strip()
     if len(name) < 3:
-        await message.answer("⚠ To'liq ism kiriting:")
+        await message.answer("⚠️ Iltimos, ism va familiyangizni to'liq kiriting:")
         return
     await state.update_data(full_name=name)
     await state.set_state(RegStates.card)
-    lang = await get_lang(message.from_user.id)
     await message.answer(t(lang, "reg_card"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.card)
 async def reg_step_card(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    lang = await get_lang(uid)
     card = re.sub(r"\D", "", message.text or "")
     if not (card.isdigit() and len(card) == 16):
-        await message.answer("⚠ Karta 16 ta raqam bo'lishi kerak:")
+        await message.answer("⚠️ Plastik karta aynan 16 ta raqamdan iborat bo'lishi kerak:")
         return
     await state.update_data(card_number=card)
     data = await state.get_data()
@@ -1596,15 +1709,14 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
         await finish_registration_process(message, state, data)
     else:
         await state.set_state(RegStates.car_model)
-        lang = await get_lang(message.from_user.id)
         await message.answer(t(lang, "reg_car_model"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.car_model)
 async def reg_step_car_model(message: Message, state: FSMContext) -> None:
     await state.update_data(car_model=(message.text or "").strip())
-    await state.set_state(RegStates.car_number)
     lang = await get_lang(message.from_user.id)
+    await state.set_state(RegStates.car_number)
     await message.answer(t(lang, "reg_car_number"), reply_markup=cancel_kb(lang))
 
 
@@ -1625,51 +1737,47 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     car_model = data.get("car_model") or "Chevrolet"
     car_number = data.get("car_number") or ""
     y_id = data.get("yandex_driver_id")
-    try:
-        position = await db_finish_registration(
-            telegram_id=uid, full_name=full_name, phone=phone, card_number=card,
-            car_model=car_model, car_number=car_number, yandex_driver_id=y_id
-        )
-    except Exception:
-        position = "LCH-AUTO"
+
+    position = await db_finish_registration(
+        telegram_id=uid, full_name=full_name, phone=phone, card_number=card,
+        car_model=car_model, car_number=car_number, yandex_driver_id=y_id,
+    )
 
     await message.answer(t(lang, "reg_success", position=position), reply_markup=user_main_kb(lang, uid))
+
     init_bal = 0
     if y_id:
+        live_b = await yandex_api.get_driver_balance(y_id, phone=phone)
+        if live_b is not None:
+            init_bal = live_b
+            await db_update_balance(uid, live_b)
+
+    yandex_txt = "Ulangan ✅" if y_id else "Ulanmagan ❌"
+
+    admin_alert = (
+        f"🆕 <b>YANGI HAYDOVCHI RO'YXATDAN O'TDI!</b>\n\n"
+        f"🆔 POSITION: <code>{position}</code>\n"
+        f"👤 <b>Haydovchi:</b> {full_name}\n"
+        f"📱 <b>Telefon:</b> <code>{phone}</code>\n"
+        f"🚗 <b>Avtomobil:</b> {car_model} ({car_number})\n"
+        f"💳 <b>Karta (Maskalangan):</b> <code>{mask_card(card)}</code>\n"
+        f"💰 <b>Boshlang'ich Balans:</b> <b>{fmt_sum(init_bal)} so'm</b>\n"
+        f"🚖 <b>Yandex Pro:</b> {yandex_txt}"
+    )
+
+    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")
+    ]])
+
+    for adm in ADMIN_IDS:
         try:
-            live_b = await yandex_api.get_driver_balance(y_id, phone=phone)
-            if live_b is not None:
-                init_bal = live_b
-                await db_update_balance(uid, live_b)
+            await bot.send_message(adm, admin_alert, reply_markup=adm_kb)
         except Exception:
             pass
 
-    yandex_txt = "Ulangan ✅" if y_id else "Ulanmagan ❌"
-    fn_esc = esc(full_name)
-    ph_esc = esc(phone)
-    cm_esc = esc(car_model)
-    cn_esc = esc(car_number)
-    admin_alert = (
-        f"🆕 <b>YANGI HAYDOVCHI!</b>\n\n"
-        f"🆔 POSITION: <code>{position}</code>\n"
-        f"👤 <b>{fn_esc}</b>\n"
-        f"📱 <code>{ph_esc}</code>\n"
-        f"🚗 {cm_esc} ({cn_esc})\n"
-        f"💳 <code>{mask_card(card)}</code>\n"
-        f"💰 Balans: <b>{fmt_sum(init_bal)} so'm</b>\n"
-        f"🚖 Yandex: {yandex_txt}"
-    )
-    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Chat", url=f"tg://user?id={uid}")]])
-    for adm in ADMIN_IDS:
-        if adm != uid:
-            try:
-                await bot.send_message(adm, admin_alert, reply_markup=adm_kb)
-            except Exception:
-                pass
-
 
 # ============================================================
-# BALANS VA BUYURTMALAR
+# 11. BALANS (100% REAL VAQT)
 # ============================================================
 
 @router.message(F.text.in_(["💰 Balans", "💰 Баланс"]))
@@ -1677,116 +1785,207 @@ async def balance_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
         return
+
     lang = user.get("language", "uz")
-    wait_msg = await message.answer("⏳ <i>Balans olinmoqda...</i>")
+    wait_msg = await message.answer("⏳ <i>Yandex Pro dan real vaqtdagi balans olinmoqda...</i>")
+
+    y_id = user.get("yandex_driver_id")
+    phone = user.get("phone")
+
     has_pending = await db_has_pending_withdrawal(user["id"])
-    live_bal = await yandex_api.get_driver_balance(user.get("yandex_driver_id"), phone=user.get("phone"))
-    if live_bal is not None and not has_pending:
-        await db_update_balance(uid, live_bal)
-        cur_bal = live_bal
+    live_bal = await yandex_api.get_driver_balance(y_id, phone=phone)
+
+    if live_bal is not None:
+        if not has_pending:
+            await db_update_balance(uid, live_bal)
+            cur_bal = live_bal
+        else:
+            cur_bal = int(user.get("balance", 0) or 0)
     else:
         cur_bal = int(user.get("balance", 0) or 0)
+
+    if not y_id and phone:
+        y_drv = await yandex_api.get_driver_by_phone(phone)
+        if y_drv and y_drv.get("id"):
+            y_id = y_drv["id"]
+            now_iso = tashkent_now_iso()
+            if db_pool:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("UPDATE users SET yandex_driver_id=$1, updated_at=$2 WHERE id=$3", y_id, now_iso, user["id"])
+            else:
+                conn = sqlite3.connect(DB_PATH, timeout=10)
+                with conn:
+                    conn.execute("UPDATE users SET yandex_driver_id=?, updated_at=? WHERE id=?", (y_id, now_iso, user["id"]))
+                conn.close()
+
     try:
         await wait_msg.delete()
     except Exception:
         pass
+
+    y_status = "Ulangan ✅ (Real vaqt)" if (y_id or live_bal is not None) else "Ulanmagan ❌"
     today_withdrawn = await db_get_driver_today_withdrawn(user["id"])
     avail = max(0, cur_bal - MIN_DEPOSIT)
-    fn = esc(user.get("full_name", ""))
-    pos = user.get("position", "N/A")
-    ph = esc(user.get("phone", ""))
-    cm = esc(user.get("car_model", ""))
-    cn = esc(user.get("car_number", ""))
-    mc = mask_card(user.get("card_number", ""))
-    time_str = datetime.now(TASHKENT_TZ).strftime("%H:%M:%S")
+
+    u_pos = user.get("position", "N/A")
+    u_name = user.get("full_name", "Haydovchi")
+    u_phone = user.get("phone", "")
+    u_car = f"{user.get('car_model','')} ({user.get('car_number','')})"
+    u_card_masked = mask_card(user.get("card_number", ""))
+
+    now_tashkent = datetime.now(TASHKENT_TZ)
+    time_str = now_tashkent.strftime("%H:%M:%S")
 
     text = (
-        f"💰 <b>{BOT_NAME} — Balans (Real vaqt):</b>\n"
-        f"🕒 {time_str}\n\n"
-        f"👤 {fn}\n"
-        f"🆔 <code>{pos}</code>\n"
-        f"📱 <code>{ph}</code>\n"
-        f"🚗 {cm} ({cn})\n"
-        f"💳 <code>{mc}</code>\n"
-        f"➖➖➖\n"
-        f"💳 Balans: <b>{fmt_sum(cur_bal)} so'm</b>\n"
-        f"🔒 Depozit: {fmt_sum(MIN_DEPOSIT)}\n"
-        f"💸 Bugun yechilgan: {fmt_sum(today_withdrawn)}\n"
-        f"✅ Yechish mumkin: <b>{fmt_sum(avail)} so'm</b>"
+        f"💰 <b>{BOT_NAME} — Shaxsiy Balans (Real vaqt):</b>\n"
+        f"🕒 <i>So'nggi yangilanish: {time_str}</i>\n\n"
+        f"👤 <b>Haydovchi:</b> {u_name}\n"
+        f"🆔 <b>POSITION:</b> <code>{u_pos}</code>\n"
+        f"📱 <b>Telefon:</b> <code>{u_phone}</code>\n"
+        f"🚗 <b>Avtomobil:</b> {u_car}\n"
+        f"💳 <b>Karta:</b> <code>{u_card_masked}</code>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"💳 <b>Yandex Pro Balans:</b> <b>{fmt_sum(cur_bal)} so'm</b>\n"
+        f"🔒 <b>Minimal depozit (majburiy):</b> {fmt_sum(MIN_DEPOSIT)} so'm\n"
+        f"💸 <b>Bugun yechib olingan:</b> <b>{fmt_sum(today_withdrawn)} so'm</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"✅ <b>Kartaga yechish mumkin:</b> <b>{fmt_sum(avail)} so'm</b>\n\n"
+        f"🚕 <b>Yandex Pro holati:</b> {y_status}"
+    ) if lang == "uz" else (
+        f"💰 <b>{BOT_NAME} — Личный Баланс (Реальное время):</b>\n"
+        f"🕒 <i>Обновлено: {time_str}</i>\n\n"
+        f"👤 <b>Водитель:</b> {u_name}\n"
+        f"🆔 <b>POSITION:</b> <code>{u_pos}</code>\n"
+        f"📱 <b>Телефон:</b> <code>{u_phone}</code>\n"
+        f"🚗 <b>Автомобиль:</b> {u_car}\n"
+        f"💳 <b>Карта:</b> <code>{u_card_masked}</code>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"💳 <b>Баланс Яндекс Про:</b> <b>{fmt_sum(cur_bal)} сум</b>\n"
+        f"🔒 <b>Неснижаемый остаток:</b> {fmt_sum(MIN_DEPOSIT)} сум\n"
+        f"💸 <b>Выведено за сегодня:</b> <b>{fmt_sum(today_withdrawn)} сум</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"✅ <b>Доступно к выводу:</b> <b>{fmt_sum(avail)} сум</b>\n\n"
+        f"🚕 <b>Статус Яндекс Про:</b> {y_status}"
     )
     await message.answer(text, reply_markup=user_main_kb(lang, uid))
 
 
-@router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы", "📊 Заказы"]))
+# ============================================================
+# 12. BUGUNGI BUYURTMALAR (REAL VAQT)
+# ============================================================
+
+@router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы"]))
 async def orders_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, /start")
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
         return
+
     lang = user.get("language", "uz")
-    wait_msg = await message.answer("⏳ <i>Buyurtmalar olinmoqda...</i>")
+    wait_msg = await message.answer("⏳ <i>Yandex Pro dan shaxsiy buyurtmalaringiz olinmoqda...</i>")
+
     y_id = user.get("yandex_driver_id")
+    phone = user.get("phone")
+
+    if not y_id and phone:
+        y_drv = await yandex_api.get_driver_by_phone(phone)
+        if y_drv and y_drv.get("id"):
+            y_id = y_drv["id"]
+            now_iso = tashkent_now_iso()
+            if db_pool:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("UPDATE users SET yandex_driver_id=$1, updated_at=$2 WHERE id=$3", y_id, now_iso, user["id"])
+            else:
+                conn = sqlite3.connect(DB_PATH, timeout=10)
+                with conn:
+                    conn.execute("UPDATE users SET yandex_driver_id=?, updated_at=? WHERE id=?", (y_id, now_iso, user["id"]))
+                conn.close()
+
     stats = await yandex_api.get_today_orders_stats(yandex_driver_id=y_id) if y_id else {
-        "total_orders": 0, "completed_orders": 0, "in_progress_orders": 0,
-        "total_earnings": 0, "card_earnings": 0, "cash_earnings": 0
+        "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0, "in_progress_orders": 0,
+        "total_earnings": 0, "cash_earnings": 0, "card_earnings": 0, "park_comm": 0, "api_error": ""
     }
+
     try:
         await wait_msg.delete()
     except Exception:
         pass
+
     now_tashkent = datetime.now(TASHKENT_TZ)
-    in_prog = stats.get("in_progress_orders", 0)
-    act = f"  └ 🚖 Jarayonda: <b>{in_prog} ta</b>\n" if in_prog > 0 else ""
-    date_str = now_tashkent.strftime("%d.%m.%Y | %H:%M")
-    tot_ord = stats.get("total_orders", 0)
-    cmp_ord = stats.get("completed_orders", 0)
-    tot_earn = fmt_sum(stats.get("total_earnings", 0))
-    crd_earn = fmt_sum(stats.get("card_earnings", 0))
-    csh_earn = fmt_sum(stats.get("cash_earnings", 0))
+    t_orders = stats.get("total_orders", 0)
+    c_orders = stats.get("completed_orders", 0)
+    x_orders = stats.get("cancelled_orders", 0)
+    act_orders = stats.get("in_progress_orders", 0)
+    t_earn_fmt = fmt_sum(stats.get("total_earnings", 0))
+    cd_earn_fmt = fmt_sum(stats.get("card_earnings", 0))
+    cs_earn_fmt = fmt_sum(stats.get("cash_earnings", 0))
+    p_comm_fmt = fmt_sum(stats.get("park_comm", 0))
+
+    in_prog_line = f"  └ 🚖 Hozir bajarilmoqda: <b>{act_orders} ta</b>\n" if act_orders > 0 else ""
 
     text = (
-        f"📊 <b>Bugungi buyurtmalar:</b>\n"
-        f"📅 {date_str}\n\n"
-        f"🚕 Jami: <b>{tot_ord} ta</b>\n"
-        f"  └ ✅ Tugallangan: <b>{cmp_ord} ta</b>\n"
-        f"{act}"
-        f"💰 Daromad: <b>{tot_earn} so'm</b>\n"
-        f"  └ 💳 Karta: <b>{crd_earn}</b>\n"
-        f"  └ 💵 Naqd: <b>{csh_earn}</b>"
+        f"📊 <b>Sizning Bugungi Shaxsiy Buyurtmalaringiz:</b>\n"
+        f"📅 <i>{now_tashkent.strftime('%d.%m.%Y | %H:%M:%S')} (Real vaqt)</i>\n\n"
+        f"🚕 <b>Jami buyurtmalaringiz:</b> <b>{t_orders} ta</b>\n"
+        f"  └ ✅ Tugallangan: <b>{c_orders} ta</b>\n"
+        f"{in_prog_line}"
+        f"  └ ❌ Bekor qilingan: <b>{x_orders} ta</b>\n\n"
+        f"💰 <b>Bugungi shaxsiy daromadingiz:</b> <b>{t_earn_fmt} so'm</b>\n"
+        f"  └ 💳 Karta orqali: <b>{cd_earn_fmt} so'm</b>\n"
+        f"  └ 💵 Naqd orqali: <b>{cs_earn_fmt} so'm</b>\n"
+        f"📈 <b>Taksopark komissiyasi:</b> {p_comm_fmt} so'm\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"🔥 <i>Buyurtmalarni faol bajaring va haftalik TOP mukofotlarga ega bo'ling!</i>"
     )
     await message.answer(text, reply_markup=user_main_kb(lang, uid))
 
 
 # ============================================================
-# PUL YECHISH FLOW
+# 13. PUL YECHISH (24/7)
 # ============================================================
 
-@router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)", "💸 Вывод"]), StateFilter("*"))
+@router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
 async def withdraw_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, /start")
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
         return
+
     lang = user.get("language", "uz")
-    if await db_has_pending_withdrawal(user["id"]):
-        await message.answer("⏳ <b>Faol arizangiz bor! Admin tasdig'ini kuting.</b>", reply_markup=user_main_kb(lang, uid))
+
+    has_pending = await db_has_pending_withdrawal(user["id"])
+    if has_pending:
+        await message.answer(
+            "❌ <b>Sizda allaqachon ko'rib chiqilayotgan faol ariza mavjud!</b>\n\n"
+            "Yangi ariza berishdan oldin oldingi arizangiz tasdiqlanishini kuting.",
+            reply_markup=user_main_kb(lang, uid)
+        )
         return
+
     live_bal = await yandex_api.get_driver_balance(user.get("yandex_driver_id"), phone=user.get("phone"))
     if live_bal is not None:
         await db_update_balance(uid, live_bal)
         cur_bal = live_bal
     else:
         cur_bal = int(user.get("balance", 0) or 0)
+
     avail = max(0, cur_bal - MIN_DEPOSIT)
+
     if avail < MIN_WITHDRAWAL:
-        err_msg = t(lang, "withdraw_no_money")
-        await message.answer(f"{err_msg}\n\nJoriy: <b>{fmt_sum(cur_bal)}</b>\nYechish mumkin: <b>{fmt_sum(avail)}</b>", reply_markup=user_main_kb(lang, uid))
+        await message.answer(
+            f"{t(lang, 'withdraw_no_money')}\n\n"
+            f"🔹 Joriy balans: <b>{fmt_sum(cur_bal)} so'm</b>\n"
+            f"🔹 Yechish mumkin: <b>{fmt_sum(avail)} so'm</b>\n"
+            f"🔹 Minimal yechish: <b>{fmt_sum(MIN_WITHDRAWAL)} so'm</b>",
+            reply_markup=user_main_kb(lang, uid)
+        )
         return
+
     await state.set_state(WithdrawStates.amount)
     await message.answer(t(lang, "withdraw_ask", avail=fmt_sum(avail)), reply_markup=cancel_kb(lang))
 
@@ -1795,70 +1994,123 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
 async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
-    if message.text in CANCEL_TEXTS:
-        await state.clear()
-        await message.answer(t(lang, "action_cancelled"), reply_markup=user_main_kb(lang, uid))
-        return
     raw = (message.text or "").replace(" ", "").replace("so'm", "").replace("som", "").replace("сум", "").strip()
     if not raw.isdigit():
-        await message.answer("⚠ Faqat raqam kiriting:")
+        await message.answer("⚠️ Iltimos, summani faqat musbat butun raqamlarda kiriting:")
         return
+
     amount = int(raw)
     user = await db_get_user(uid)
     cur_bal = int(user.get("balance", 0) or 0)
     avail = max(0, cur_bal - MIN_DEPOSIT)
+
     if amount < MIN_WITHDRAWAL:
         await message.answer(t(lang, "withdraw_min_err"))
         return
     if amount > avail:
-        await message.answer(f"❌ Ko'pi bilan <b>{fmt_sum(avail)}</b> yecha olasiz.")
+        await message.answer(f"❌ Mablag' yetarli emas! Siz ko'pi bilan <b>{fmt_sum(avail)} so'm</b> yecha olasiz.")
         return
+
     comm = int(amount * (COMMISSION_PERCENT / 100.0))
     net = amount - comm
     full_card_val = user.get("card_number") or ""
+    masked_card_val = mask_card(full_card_val)
     rem_deposit = cur_bal - amount
-    await state.clear()
-    try:
-        w_id = await db_create_withdrawal(
-            user_id=user["id"], telegram_id=uid, amount=amount, commission=comm,
-            net_amount=net, card_number=full_card_val, status="pending", payout_method="manual", ext_tx_id=""
-        )
-    except ValueError as val_err:
-        await message.answer(f"❌ Xatolik: {val_err}", reply_markup=user_main_kb(lang, uid))
+
+    await state.update_data(amount=amount, commission=comm, net_amount=net, card=full_card_val, rem_deposit=rem_deposit)
+    await state.set_state(WithdrawStates.confirm)
+
+    confirm_txt = (
+        f"💳 <b>Pul yechishni tasdiqlaysizmi?</b>\n\n"
+        f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
+        f"💵 Kartaga to'lanadi: <b>{fmt_sum(net)} so'm</b>\n"
+        f"🔒 Depozitda qoladi: <b>{fmt_sum(rem_deposit)} so'm</b>\n"
+        f"💳 Karta: <code>{masked_card_val}</code>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Tasdiqlayman", callback_data="wd_go:yes"),
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data="wd_go:no"),
+    ]])
+    await message.answer(confirm_txt, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("wd_go:"), WithdrawStates.confirm)
+async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    uid = callback.from_user.id
+    action = callback.data.split(":")[1]
+
+    if action == "no":
+        await state.clear()
+        await callback.message.edit_text("❌ Pul yechish bekor qilindi.")
+        await callback.answer()
         return
 
-    await message.answer(
-        f"⏳ <b>Ariza qabul qilindi! (#{w_id})</b>\n\n"
-        f"💰 Summa: <b>{fmt_sum(amount)}</b>\n"
-        f"💵 Kartaga: <b>{fmt_sum(net)}</b>\n"
-        f"💳 Karta: <code>{mask_card(full_card_val)}</code>\n\n"
-        f"👨💻 Admin tasdig'ini kuting.",
-        reply_markup=user_main_kb(lang, uid)
-    )
+    data = await state.get_data()
+    amount = data["amount"]
+    commission = data["commission"]
+    net_amount = data["net_amount"]
+    full_card = data["card"]
+    rem_deposit = data.get("rem_deposit", 0)
+    await state.clear()
 
-    pos = user.get("position", "N/A")
-    fn = esc(user.get("full_name", ""))
-    ph = esc(user.get("phone", ""))
-    cm = esc(user.get("car_model", ""))
-    cn = esc(user.get("car_number", ""))
+    user = await db_get_user(uid)
+    if not user:
+        await callback.message.edit_text("❌ Foydalanuvchi topilmadi.")
+        await callback.answer()
+        return
+
+    try:
+        w_id = await db_create_withdrawal(
+            user_id=user["id"], telegram_id=uid, amount=amount, commission=commission,
+            net_amount=net_amount, card_number=full_card, status="pending",
+            payout_method="manual", ext_tx_id="",
+        )
+    except ValueError as val_err:
+        await callback.message.edit_text(f"❌ Xatolik: {val_err}")
+        await callback.answer("Amaliyot rad etildi!", show_alert=True)
+        return
+
+    masked_c = mask_card(full_card)
+    await callback.message.edit_text(
+        f"✅ <b>Pul yechish arizangiz qabul qilindi! (Ariza #{w_id})</b>\n\n"
+        f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
+        f"💵 Kartaga tushadi: <b>{fmt_sum(net_amount)} so'm</b>\n"
+        f"💳 Karta: <code>{masked_c}</code>\n\n"
+        f"⏱ <i>Mablag' qisqa vaqt ichida kartangizga o'tkaziladi.</i>"
+    )
+    await callback.answer()
+
+    y_status_txt = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
+    u_pos = user.get("position", "N/A")
+    u_name = user.get("full_name", "")
+    u_phone = user.get("phone", "")
+    u_model = user.get("car_model", "")
+    u_num = user.get("car_number", "")
 
     admin_alert = (
-        f"💸 <b>YANGI ARIZA! (#{w_id})</b>\n\n"
-        f"🆔 <code>{pos}</code>\n"
-        f"👤 {fn}\n"
-        f"📱 <code>{ph}</code>\n"
-        f"🚗 {cm} ({cn})\n"
-        f"💳 <code>{full_card_val}</code>\n"
-        f"➖➖➖\n"
-        f"💰 Summa: {fmt_sum(amount)}\n"
-        f"💵 To'lanishi: <b>{fmt_sum(net)}</b>\n"
-        f"🔒 Qoladi: {fmt_sum(rem_deposit)}"
+        f"💸 <b>YANGI PUL YECHISH ARIZASI! (Ariza #{w_id})</b>\n\n"
+        f"🆔 POSITION: <code>{u_pos}</code>\n"
+        f"👤 <b>Haydovchi:</b> {u_name}\n"
+        f"📱 <b>Telefon:</b> <code>{u_phone}</code>\n"
+        f"🚗 <b>Avtomobil:</b> {u_model} ({u_num})\n"
+        f"💳 <b>Karta:</b> <code>{full_card}</code> <i>(Nusxa olish uchun bosing)</i>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"💰 <b>Yechilayotgan summa:</b> {fmt_sum(amount)} so'm\n"
+        f"💵 <b>Kartaga to'lanadigan sof summa:</b> <b>{fmt_sum(net_amount)} so'm</b>\n"
+        f"🔒 <b>Depozitda qoladigan:</b> {fmt_sum(rem_deposit)} so'm\n"
+        f"🚖 <b>Yandex Pro:</b> {y_status_txt}"
     )
+
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏦 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")],
-        [InlineKeyboardButton(text="💳 Click/Payme orqali to'landi (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}")],
-        [InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}"), InlineKeyboardButton(text="💬 Chat", url=f"tg://user?id={uid}")]
+        [
+            InlineKeyboardButton(text="✅ To'landi (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}"),
+            InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}")
+        ],
+        [
+            InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")
+        ]
     ])
+
     for adm in ADMIN_IDS:
         try:
             log_admin_view_card(adm, w_id)
@@ -1867,87 +2119,51 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
             pass
 
 
-@admin_router.callback_query(F.data.startswith("adm_kapital:"))
-async def admin_kapitalbank_payout(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Ruxsat yo'q!", show_alert=True)
-        return
-    w_id = int(callback.data.split(":")[1])
-    wd = await db_get_withdrawal(w_id)
-    if not wd or wd.get("status") != "pending":
-        await callback.answer("Allaachon ko'rib chiqilgan!", show_alert=True)
-        return
-    user = await db_get_user_by_id(wd["user_id"])
-    if not user:
-        await callback.answer("Haydovchi topilmadi!", show_alert=True)
-        return
-    await callback.answer("⏳ Bankka yuborilmoqda...")
-    success, bank_msg, tx_id = await kapital_bank_api.send_card_payout(
-        target_card=wd.get("card_number") or "",
-        amount_sum=int(wd.get("net_amount", 0)),
-        doc_id=w_id
-    )
-    if not success:
-        b_msg = esc(bank_msg)
-        await callback.message.reply(f"❌ <b>Bank xatoligi!</b>\n<code>{b_msg}</code>\n\nClick/Payme tugmasidan foydalaning.")
-        return
-    if user.get("yandex_driver_id"):
-        await yandex_api.create_transaction(
-            user["yandex_driver_id"],
-            int(wd["amount"]),
-            f"Kapitalbank to'lovi #{w_id} ({mask_card(wd.get('card_number',''))})"
-        )
-    await db_update_withdrawal_status(w_id, "completed", ext_tx_id=tx_id)
-    try:
-        adm_name = esc(callback.from_user.full_name)
-        await callback.message.edit_text(f"{callback.message.text}\n\n✅ <b>KAPITALBANK ORQALI TO'LANDI!</b>\n🏦 {tx_id}\n👨💻 {adm_name}")
-    except Exception:
-        pass
-    try:
-        mc = mask_card(wd.get("card_number", ""))
-        net_str = fmt_sum(wd["net_amount"])
-        await bot.send_message(
-            user["telegram_id"],
-            f"✅ <b>Ariza #{w_id} tasdiqlandi!</b>\n\n💵 <b>{net_str} so'm</b> kartangizga o'tkazildi.\n💳 <code>{mc}</code>",
-            reply_markup=user_main_kb("uz", user["telegram_id"])
-        )
-    except Exception:
-        pass
-
+# ============================================================
+# 14. ADMIN TASDIQLASH VA RAD ETISH
+# ============================================================
 
 @admin_router.callback_query(F.data.startswith("adm_pay:"))
 async def admin_approve_payout(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!", show_alert=True)
         return
+
     w_id = int(callback.data.split(":")[1])
     wd = await db_get_withdrawal(w_id)
     if not wd or wd.get("status") != "pending":
-        await callback.answer("Allaachon ko'rib chiqilgan!", show_alert=True)
+        await callback.answer("Bu ariza allaqachon ko'rib chiqilgan!", show_alert=True)
         return
+
     user = await db_get_user_by_id(wd["user_id"])
     if not user:
         await callback.answer("Haydovchi topilmadi!", show_alert=True)
         return
+
     if user.get("yandex_driver_id"):
         await yandex_api.create_transaction(
             user["yandex_driver_id"],
             int(wd["amount"]),
-            f"Click/Payme #{w_id} ({mask_card(wd.get('card_number',''))})"
+            f"Lochin Taxi Bot to'lovi #{w_id} ({mask_card(wd.get('card_number',''))})"
         )
+
     await db_update_withdrawal_status(w_id, "completed")
+
     try:
-        adm_name = esc(callback.from_user.full_name)
-        await callback.message.edit_text(f"{callback.message.text}\n\n✅ <b>TO'LANDI (Click/Payme) VA YANDEXDAN YECHILDI!</b>\n👨💻 {adm_name}")
+        await callback.message.edit_text(
+            f"{callback.message.text}\n\n✅ <b>TO'LANDI VA YANDEX PRODAN YECHILDI!</b>\n👨💻 Admin: {callback.from_user.full_name}"
+        )
     except Exception:
         pass
-    await callback.answer("Tasdiqlandi!")
+    await callback.answer("To'lov tasdiqlandi!")
+
     try:
-        net_str = fmt_sum(wd["net_amount"])
         await bot.send_message(
             user["telegram_id"],
-            f"✅ <b>Ariza #{w_id} tasdiqlandi!</b>\n\n💵 <b>{net_str} so'm</b> kartangizga o'tkazildi.",
-            reply_markup=user_main_kb("uz", user["telegram_id"])
+            f"✅ <b>Pul yechish arizangiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
+            f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> kartangizga muvaffaqiyatli o'tkazildi.\n"
+            f"💳 Karta: <code>{mask_card(wd.get('card_number',''))}</code>\n\n"
+            f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>"
         )
     except Exception:
         pass
@@ -1958,33 +2174,38 @@ async def admin_reject_payout(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!", show_alert=True)
         return
+
     w_id = int(callback.data.split(":")[1])
     wd = await db_get_withdrawal(w_id)
     if not wd or wd.get("status") != "pending":
-        await callback.answer("Allaachon ko'rib chiqilgan!", show_alert=True)
+        await callback.answer("Bu ariza allaqachon ko'rib chiqilgan!", show_alert=True)
         return
+
     await db_refund_withdrawal(w_id)
+
     user = await db_get_user_by_id(wd["user_id"])
     try:
-        adm_name = esc(callback.from_user.full_name)
-        await callback.message.edit_text(f"{callback.message.text}\n\n❌ <b>RAD ETILDI VA QAYTARILDI.</b>\n👨💻 {adm_name}")
+        await callback.message.edit_text(
+            f"{callback.message.text}\n\n❌ <b>ARIZA RAD ETILDI VA BALANS QAYTARILDI.</b>\n👨💻 Admin: {callback.from_user.full_name}"
+        )
     except Exception:
         pass
-    await callback.answer("Rad etildi!")
+    await callback.answer("Ariza rad etildi!")
+
     if user:
         try:
-            amt_str = fmt_sum(wd["amount"])
             await bot.send_message(
                 user["telegram_id"],
-                f"❌ <b>Ariza #{w_id} rad etildi!</b>\n\n💰 {amt_str} so'm balansga qaytarildi.",
-                reply_markup=user_main_kb("uz", user["telegram_id"])
+                f"❌ <b>Pul yechish arizangiz rad etildi. (Ariza #{w_id})</b>\n\n"
+                f"💰 {fmt_sum(wd['amount'])} so'm balansingizga qaytarildi.\n"
+                f"Batafsil ma'lumot uchun menejer bilan bog'laning."
             )
         except Exception:
             pass
 
 
 # ============================================================
-# PROFIL VA SOS
+# 15. PROFIL, TOP, SOS
 # ============================================================
 
 @router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
@@ -1992,29 +2213,35 @@ async def profile_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, /start")
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
         return
     lang = user.get("language", "uz")
     y_val = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
-    pos = user.get("position", "N/A")
-    fn = esc(user.get("full_name", ""))
-    ph = esc(user.get("phone", ""))
-    cm = esc(user.get("car_model", ""))
-    cn = esc(user.get("car_number", ""))
-    mc = mask_card(user.get("card_number", ""))
+    u_pos = user.get("position", "N/A")
+    u_name = user.get("full_name", "")
+    u_phone = user.get("phone", "")
+    u_model = user.get("car_model", "")
+    u_num = user.get("car_number", "")
+    u_card_masked = mask_card(user.get("card_number", ""))
+    lang_display = "O'zbekcha" if lang == "uz" else "Русский"
 
     text = (
-        f"👤 <b>Profil:</b>\n\n"
-        f"🆔 <code>{pos}</code>\n"
-        f"👤 <b>{fn}</b>\n"
-        f"📱 <b>{ph}</b>\n"
-        f"🚗 <b>{cm} ({cn})</b>\n"
-        f"💳 <code>{mc}</code>\n"
-        f"🚕 Yandex: <b>{y_val}</b>"
+        f"👤 <b>Haydovchi Profili:</b>\n\n"
+        f"🆔 POSITION: <code>{u_pos}</code>\n"
+        f"👤 Ism: <b>{u_name}</b>\n"
+        f"📱 Telefon: <b>{u_phone}</b>\n"
+        f"🚗 Avtomobil: <b>{u_model} ({u_num})</b>\n"
+        f"💳 Karta: <code>{u_card_masked}</code>\n"
+        f"🚕 Yandex: <b>{y_val}</b>\n"
+        f"🌐 Til: <b>{lang_display}</b>"
     )
-    inline_rows = [[InlineKeyboardButton(text="🌐 Tilni o'zgartirish", callback_data="change_lang_menu")]]
+
+    inline_rows = [
+        [InlineKeyboardButton(text="🌐 Tilni o'zgartirish" if lang == "uz" else "🌐 Сменить язык", callback_data="change_lang_menu")]
+    ]
     if is_admin(uid):
-        inline_rows.append([InlineKeyboardButton(text="🛠 Admin Panel", callback_data="open_admin_panel_cb")])
+        inline_rows.append([InlineKeyboardButton(text="🛠 Admin Panelga o'tish", callback_data="open_admin_panel_cb")])
+
     await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=inline_rows))
 
 
@@ -2025,24 +2252,46 @@ async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) 
         return
     await state.clear()
     lang = await get_lang(callback.from_user.id)
-    await callback.message.answer("🛠 <b>Admin Panel:</b>", reply_markup=admin_main_kb(lang))
+    await callback.message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
     await callback.answer()
 
 
 @router.callback_query(F.data == "change_lang_menu")
 async def change_lang_menu_cb(callback: CallbackQuery) -> None:
-    await callback.message.edit_text("🌐 Tilni tanlang:", reply_markup=language_inline_kb())
+    await callback.message.edit_text("🌐 Tilni tanlang / Выберите язык:", reply_markup=language_inline_kb())
     await callback.answer()
 
 
-@router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа", "📢 Новости"]))
+@router.message(F.text.in_(["🏆 TOP Haydovchilar", "🏆 ТОП Водителей"]))
+async def top_drivers_handler(message: Message) -> None:
+    uid = message.from_user.id
+    lang = await get_lang(uid)
+    drivers = await db_get_all_registered_drivers()
+    top = sorted(drivers, key=lambda x: int(x.get("total_orders", 0) or 0), reverse=True)[:10]
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    text = f"🏆 <b>{BOT_NAME} — Haftaning Eng Faol Haydovchilari:</b>\n\n"
+    if top and any(int(d.get("total_orders", 0) or 0) > 0 for d in top):
+        for i, d in enumerate(top):
+            medal_icon = medals[i] if i < len(medals) else str(i + 1)
+            d_name = d.get("full_name", "")
+            d_pos = d.get("position", "N/A")
+            d_orders = d.get("total_orders", 0)
+            text += f"{medal_icon}. <b>{d_name}</b> (<code>{d_pos}</code>) — <b>{d_orders} ta zakaz</b>\n"
+    else:
+        text += "<i>Hozircha haftalik reyting shakllanmoqda...</i>\n"
+    text += "\n🔥 <i>Ko'proq buyurtma bajaring va haftalik maxsus bonuslarga ega bo'ling!</i>"
+    await message.answer(text, reply_markup=user_main_kb(lang, uid))
+
+
+@router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа"]))
 async def group_handler(message: Message) -> None:
     lang = await get_lang(message.from_user.id)
-    btn_txt = "💬 Guruhga qo'shilish" if lang == "uz" else "💬 Вступить"
-    await message.answer(f"📢 <b>{BOT_NAME} Guruhi:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_txt, url=DRIVER_GROUP_LINK)]]))
+    btn_txt = "💬 Haydovchilar guruhiga qo'shilish" if lang == "uz" else "💬 Вступить в группу водителей"
+    await message.answer(f"📢 <b>{BOT_NAME} Rasmiy Guruhimiz:</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_txt, url=DRIVER_GROUP_LINK)]]))
 
 
-@router.message(F.text.in_(["🆘 Yordam / SOS", "🆘 Помощь / SOS", "🆘 Помощь"]), StateFilter("*"))
+@router.message(F.text.in_(["🆘 Yordam / SOS", "🆘 Помощь / SOS"]), StateFilter("*"))
 async def sos_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     lang = await get_lang(message.from_user.id)
@@ -2069,20 +2318,21 @@ async def sos_receive_location_geo(message: Message, state: FSMContext) -> None:
     user = await db_get_user(uid) or {}
     lat, lon = message.location.latitude, message.location.longitude
     maps_url = f"https://maps.google.com/?q={lat},{lon}"
-    fn = esc(user.get("full_name") or "Noma'lum")
-    pos = user.get("position") or "N/A"
-    ph = esc(user.get("phone", ""))
-    cm = esc(user.get("car_model", ""))
-    cn = esc(user.get("car_number", ""))
+
+    u_name = user.get("full_name", "Noma'lum")
+    u_pos = user.get("position", "N/A")
+    u_phone = user.get("phone", "Noma'lum")
+    u_model = user.get("car_model", "")
+    u_num = user.get("car_number", "")
 
     alert = (
-        f"🚨 <b>SOS / LOKATSIYA!</b>\n\n"
-        f"👤 {fn} (<code>{pos}</code>)\n"
-        f"📱 <code>{ph}</code>\n"
-        f"🚗 {cm} ({cn})\n\n"
-        f"📍 <a href='{maps_url}'>Xaritada ochish</a>"
+        f"🚨 <b>DIQQAT: SOS / LOKATSIYA!</b>\n\n"
+        f"👤 {u_name} (<code>{u_pos}</code>)\n"
+        f"📱 <code>{u_phone}</code>\n"
+        f"🚗 {u_model} ({u_num})\n\n"
+        f"📍 <a href='{maps_url}'>Google Xaritada ochish</a>"
     )
-    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Chat", url=f"tg://user?id={uid}")]])
+    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")]])
     for adm in ADMIN_IDS:
         try:
             await bot.send_message(adm, alert, reply_markup=adm_kb)
@@ -2102,18 +2352,22 @@ async def sos_receive_location_text(message: Message, state: FSMContext) -> None
         return
     await state.clear()
     user = await db_get_user(uid) or {}
-    fn = esc(user.get("full_name") or "Noma'lum")
-    pos = user.get("position") or "N/A"
-    ph = esc(user.get("phone", ""))
-    msg_addr = esc(message.text.strip())
+
+    u_name = user.get("full_name", "Noma'lum")
+    u_pos = user.get("position", "N/A")
+    u_phone = user.get("phone", "Noma'lum")
+    u_model = user.get("car_model", "")
+    u_num = user.get("car_number", "")
+    address_txt = message.text.strip()
 
     alert = (
-        f"🚨 <b>SOS / MANZIL:</b>\n\n"
-        f"👤 {fn} (<code>{pos}</code>)\n"
-        f"📱 <code>{ph}</code>\n\n"
-        f"📍 {msg_addr}"
+        f"🚨 <b>SOS / MANZIL (MATN):</b>\n\n"
+        f"👤 {u_name} (<code>{u_pos}</code>)\n"
+        f"📱 <code>{u_phone}</code>\n"
+        f"🚗 {u_model} ({u_num})\n\n"
+        f"📍 <b>Manzil:</b>\n{address_txt}"
     )
-    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Chat", url=f"tg://user?id={uid}")]])
+    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")]])
     for adm in ADMIN_IDS:
         try:
             await bot.send_message(adm, alert, reply_markup=adm_kb)
@@ -2144,18 +2398,22 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     user = await db_get_user(uid) or {}
-    fn = esc(user.get("full_name") or "Noma'lum")
-    pos = user.get("position") or "N/A"
-    ph = esc(user.get("phone", ""))
-    txt_msg = esc(message.text or "")
+
+    u_name = user.get("full_name", "Noma'lum")
+    u_pos = user.get("position", "N/A")
+    u_phone = user.get("phone", "Noma'lum")
+    u_model = user.get("car_model", "")
+    u_num = user.get("car_number", "")
+    msg_txt = message.text or "[Xabar]"
 
     alert = (
-        f"📩 <b>MUROJAAT:</b>\n\n"
-        f"👤 {fn} (<code>{pos}</code>)\n"
-        f"📱 <code>{ph}</code>\n\n"
-        f"✍ {txt_msg}"
+        f"📩 <b>HAYDOVCHIDAN MUROJAAT:</b>\n\n"
+        f"👤 {u_name} (<code>{u_pos}</code>)\n"
+        f"📱 <code>{u_phone}</code>\n"
+        f"🚗 {u_model} ({u_num})\n\n"
+        f"✍️ <b>Xabar:</b>\n{msg_txt}"
     )
-    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Javob", url=f"tg://user?id={uid}")]])
+    adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Javob yozish", url=f"tg://user?id={uid}")]])
     for adm in ADMIN_IDS:
         try:
             await bot.send_message(adm, alert, reply_markup=adm_kb)
@@ -2165,99 +2423,67 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# ADMIN PANEL HANDLERS
+# 16. ADMIN PANEL (REAL VAQT VA DIAGNOSTIKA BILAN)
 # ============================================================
 
-@admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель", "🛠 Админ"]), StateFilter("*"))
+@admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]), StateFilter("*"))
 async def admin_open(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
     await state.clear()
     lang = await get_lang(message.from_user.id)
-    await message.answer("🛠 <b>Admin Panel:</b>", reply_markup=admin_main_kb(lang))
+    await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
 
 
-@admin_router.message(Command("clear_pending"))
-async def cmd_clear_pending(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    args = message.text.split()
-    if len(args) > 1:
-        driver = await db_find_driver_by_query(args[1].strip())
-        if not driver:
-            await message.answer(f"❌ '{args[1]}' topilmadi.")
-            return
-        count = await db_force_complete_pending(user_id=driver["id"])
-        d_name = esc(driver.get("full_name"))
-        await message.answer(f"✅ {d_name} ning {count} ta arizasi yopildi!")
-    else:
-        count = await db_force_complete_pending()
-        await message.answer(f"✅ Barcha {count} ta ariza yopildi!")
-
-
-@admin_router.message(F.text.in_(["⏳ Kutilayotgan arizalar", "⏳ Заявки на вывод", "⏳ Заявки"]))
-async def admin_pending_withdrawals_list(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    pending_list = await db_get_all_pending_withdrawals()
-    if not pending_list:
-        await message.answer("✅ Kutilayotgan ariza yo'q.")
-        return
-    await message.answer(f"⏳ <b>Kutilayotgan arizalar (Jami: {len(pending_list)} ta):</b>")
-    for wd in pending_list:
-        w_id = wd["id"]
-        pos = wd.get("position", "N/A")
-        fn = esc(wd.get("full_name", "Haydovchi"))
-        ph = esc(wd.get("phone", ""))
-        cn = wd.get("card_number", "")
-        req_sum = fmt_sum(wd.get("amount", 0))
-        net_sum = fmt_sum(wd.get("net_amount", 0))
-
-        alert_text = (
-            f"💸 <b>Ariza #{w_id}</b>\n"
-            f"🆔 <code>{pos}</code>\n"
-            f"👤 {fn}\n"
-            f"📱 <code>{ph}</code>\n"
-            f"💳 <code>{cn}</code>\n"
-            f"💰 {req_sum} | To'lanadi: <b>{net_sum}</b>"
-        )
-        adm_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🏦 Kapitalbank", callback_data=f"adm_kapital:{w_id}")],
-            [InlineKeyboardButton(text="💳 Click/Payme to'landi", callback_data=f"adm_pay:{w_id}")],
-            [InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}")]
-        ])
-        await message.answer(alert_text, reply_markup=adm_kb)
-
-
-@admin_router.message(F.text.in_(["🚖 Bugungi Park Zakazlari", "🚖 Заказы парка за сегодня", "🚕 Bugungi Park Zakazlari", "🚖 Заказы парка"]))
+@admin_router.message(F.text.in_(["🚖 Bugungi Park Zakazlari", "🚖 Заказы парка за сегодня"]))
 async def admin_park_today_orders(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    status_msg = await message.answer("⏳ <i>Yandex dan olinmoqda...</i>")
+    status_msg = await message.answer("⏳ <i>Yandex Pro dan taksopark bo'yicha buyurtmalar olinmoqda (Real vaqt)...</i>")
+
     stats = await yandex_api.get_today_orders_stats(yandex_driver_id=None)
     try:
         await status_msg.delete()
     except Exception:
         pass
+
     now_tashkent = datetime.now(TASHKENT_TZ)
-    in_prog = stats.get("in_progress_orders", 0)
-    in_prog_str = f"  └ 🚖 Jarayonda: <b>{in_prog} ta</b>\n" if in_prog > 0 else ""
-    date_str = now_tashkent.strftime("%d.%m.%Y | %H:%M:%S")
-    tot_ord = stats.get("total_orders", 0)
-    cmp_ord = stats.get("completed_orders", 0)
-    tot_earn = fmt_sum(stats.get("total_earnings", 0))
-    crd_earn = fmt_sum(stats.get("card_earnings", 0))
-    csh_earn = fmt_sum(stats.get("cash_earnings", 0))
+    t_orders = stats.get("total_orders", 0)
+    c_orders = stats.get("completed_orders", 0)
+    x_orders = stats.get("cancelled_orders", 0)
+    act_orders = stats.get("in_progress_orders", 0)
+    t_earn = fmt_sum(stats.get("total_earnings", 0))
+    cd_earn = fmt_sum(stats.get("card_earnings", 0))
+    cs_earn = fmt_sum(stats.get("cash_earnings", 0))
+    p_comm = fmt_sum(stats.get("park_comm", 0))
+    api_err = stats.get("api_error", "")
+
+    # Liniyada hozir zakazda turganlar
+    in_prog_str = f"  └ 🚖 Hozir jarayonda (Zakazda): <b>{act_orders} ta</b>\n" if act_orders > 0 else ""
+
+    diag_text = ""
+    if api_err:
+        if "403" in api_err:
+            diag_text = (
+                f"\n\n⚠️ <b>YANDEX API RUXSAT XATOSI (HTTP 403):</b>\n"
+                f"Sizning Yandex API kalitingizda <b>'Заказы'</b> (Buyurtmalar) bo'limi yoqilmagan!\n"
+                f"📌 <i>Tuzatish uchun:</i> Yandex Dispetcherskaya (Kabinet) > Настройки > API ga kiring va API kalitingizni tahrirlab, <b>'Заказы'</b> ga belgi (galochka) qo'ying."
+            )
+        else:
+            diag_text = f"\n\n⚠️ <i>Yandex API xabari: <code>{api_err}</code></i>"
 
     await message.answer(
-        f"🚖 <b>Bugungi Park Buyurtmalari (Real vaqt):</b>\n"
-        f"📅 {date_str}\n\n"
-        f"🚕 Jami: <b>{tot_ord} ta</b>\n"
-        f"  └ ✅ Tugallangan: <b>{cmp_ord} ta</b>\n"
-        f"{in_prog_str}\n"
-        f"💰 Aylanma: <b>{tot_earn} so'm</b>\n"
-        f"  └ 💳 Karta: <b>{crd_earn}</b>\n"
-        f"  └ 💵 Naqd: <b>{csh_earn}</b>"
+        f"🚖 <b>Bugungi Butun Taksopark Bo'yicha Umumiy Buyurtmalar:</b>\n"
+        f"📅 <i>{now_tashkent.strftime('%d.%m.%Y | %H:%M:%S')} holatiga (Real vaqt)</i>\n\n"
+        f"🚕 <b>Jami tushgan zakazlar:</b> <b>{t_orders} ta</b>\n"
+        f"  └ ✅ Tugallangan zakazlar: <b>{c_orders} ta</b>\n"
+        f"{in_prog_str}"
+        f"  └ ❌ Bekor qilingan: <b>{x_orders} ta</b>\n\n"
+        f"💰 <b>Bugungi park umumiy aylanmasi:</b> <b>{t_earn} so'm</b>\n"
+        f"  └ 💳 Karta orqali aylanma: <b>{cd_earn} so'm</b>\n"
+        f"  └ 💵 Naqd orqali aylanma: <b>{cs_earn} so'm</b>\n"
+        f"📈 <b>Taksopark komissiyasi tushumi:</b> <b>{p_comm} so'm</b>"
+        f"{diag_text}"
     )
 
 
@@ -2267,26 +2493,25 @@ async def admin_stats_handler(message: Message) -> None:
         return
     stats = await db_get_stats()
     tot_u = stats.get("total_users", 0)
-    bot_u = stats.get("bot_users", 0)
     reg_d = stats.get("registered_drivers", 0)
     y_lnk = stats.get("yandex_linked", 0)
+
     td_w = fmt_sum(stats.get("today_withdrawn", 0))
     mn_w = fmt_sum(stats.get("month_withdrawn", 0))
-    tt_w = fmt_sum(stats.get("total_withdrawn", 0))
-    pn_c = stats.get("pending_count", 0)
-    pn_s = fmt_sum(stats.get("pending_sum", 0))
+    tot_w = fmt_sum(stats.get("total_withdrawn", 0))
+    pend_c = stats.get("pending_count", 0)
+    pend_s = fmt_sum(stats.get("pending_sum", 0))
 
     await message.answer(
-        f"📊 <b>{BOT_NAME} — Statistika:</b>\n\n"
-        f"👥 Jami ro'yxatdagilar: <b>{tot_u} ta</b>\n"
-        f"🤖 Botga ulangan haydovchilar: <b>{bot_u} ta</b>\n"
-        f"🚕 Ro'yxatdan o'tganlar: <b>{reg_d} ta</b>\n"
-        f"🔗 Yandex ulangan: <b>{y_lnk} ta</b>\n"
-        f"➖➖➖\n"
-        f"📅 Bugun yechilgan: <b>{td_w}</b>\n"
-        f"🗓 Oyda: <b>{mn_w}</b>\n"
-        f"💸 Jami: <b>{tt_w}</b>\n\n"
-        f"⏳ Kutilayotgan: <b>{pn_c} ta</b> ({pn_s})"
+        f"📊 <b>{BOT_NAME} — To'liq Tizim Statistikasi:</b>\n\n"
+        f"👥 Jami bot foydalanuvchilari: <b>{tot_u} ta</b>\n"
+        f"🚕 Ro'yxatdan o'tgan haydovchilar: <b>{reg_d} ta</b>\n"
+        f"🔗 Yandex Pro ulangan: <b>{y_lnk} ta</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"📅 <b>Bugun yechilgan summa:</b> <b>{td_w} so'm</b>\n"
+        f"🗓 <b>Shu oyda yechilgan:</b> <b>{mn_w} so'm</b>\n"
+        f"💸 <b>Jami (Barcha davrda):</b> <b>{tot_w} so'm</b>\n\n"
+        f"⏳ <b>Kutilayotgan arizalar:</b> <b>{pend_c} ta</b> ({pend_s} so'm)"
     )
 
 
@@ -2294,186 +2519,209 @@ async def admin_stats_handler(message: Message) -> None:
 async def admin_export_excel(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    status_msg = await message.answer("⏳ <i>Excel tayyorlanmoqda...</i>")
+    status_msg = await message.answer("⏳ <i>Yandex bazasi bilan jonli solishtirilib, Excel tayyorlanmoqda...</i>")
     try:
         excel_bytes = await generate_monthly_excel_report()
         now = datetime.now(TASHKENT_TZ)
-        time_fn = now.strftime("%Y_%m_%d_%H%M")
-        file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_{time_fn}.xlsx")
-        m_name = UZ_MONTHS.get(now.month, "")
-        await bot.send_document(chat_id=message.chat.id, document=file, caption=f"📊 <b>{now.year}-yil {m_name} hisoboti</b>")
+        month_name = UZ_MONTHS.get(now.month, "Oy")
+        now_str = now.strftime("%Y_%m_%d_%H%M")
+
+        for adm in ADMIN_IDS:
+            try:
+                file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_Hisobot_{now_str}.xlsx")
+                await bot.send_document(
+                    chat_id=adm,
+                    document=file,
+                    caption=f"📊 <b>{now.year}-yil {month_name} oyi Lochin Taxi hisoboti!</b>\n<i>(Kartalar xavfsiz maskalangan, jonli balanslar ko'rsatilgan)</i>"
+                )
+            except Exception:
+                pass
+
         try:
             await status_msg.delete()
         except Exception:
             pass
     except Exception as e:
         logger.error(f"Excel xatosi: {e}")
-        await status_msg.edit_text("❌ Excel xatosi.")
+        await status_msg.edit_text("❌ Excel yaratishda xatolik yuz berdi.")
 
 
-@admin_router.message(F.text.in_(["🔄 Yandex Sinxronlash", "🔄 Синхронизация Яндекс", "🔄 Синхронизация"]))
+@admin_router.message(F.text.in_(["🔄 Yandex Sinxronlash", "🔄 Синхронизация Яндекс"]))
 async def admin_sync_all_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    status_msg = await message.answer("⏳ <i>Yandex bazasi yuklanmoqda...</i>")
-    try:
-        drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
-        if not drivers:
-            err_d = esc(err_msg or "Noma'lum xatolik")
-            await status_msg.edit_text(f"❌ <b>Yandex dan ma'lumot olinmadi!</b>\n\n<code>{err_d}</code>")
-            return
+    status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar tekshirilmoqda...</i>")
 
-        pending_yandex_ids = await db_get_pending_yandex_ids()
-        inserted_count = 0
-        updated_count = 0
-        now = tashkent_now_iso()
+    drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
+    if not drivers:
+        err_detail = err_msg if err_msg else "Noma'lum xatolik"
+        await status_msg.edit_text(
+            f"❌ <b>Yandex API dan ma'lumot olib bo'lmadi!</b>\n\n"
+            f"🔍 <b>Xatolik sababi:</b>\n<code>{err_detail}</code>\n\n"
+            f"📌 <i>Tekshiring:</i>\n"
+            f"• <code>YANDEX_API_KEY</code>\n"
+            f"• <code>YANDEX_CLIENT_ID</code>\n"
+            f"• <code>YANDEX_PARK_ID</code>"
+        )
+        return
 
-        for raw in drivers:
-            norm = yandex_api._normalize(raw)
-            y_id = norm["id"]
-            if not y_id:
-                continue
+    pending_yandex_ids = await db_get_pending_yandex_ids()
+    updated_count = 0
+    now = tashkent_now_iso()
 
-            bal = int(norm["balance"])
-            phone = norm["phone"]
-            p_clean = clean_phone_number(phone) if phone else ""
-            short9 = p_clean[-9:] if p_clean else ""
-            full_name = norm["full_name"]
-            car_model = norm["car_model"]
-            car_num = norm["car_number"]
+    for raw_drv in drivers:
+        norm = yandex_api._normalize(raw_drv)
+        y_id = norm["id"]
+        bal = int(norm["balance"])
+        car_num = norm["car_number"]
+        car_model = norm["car_model"]
+        full_name = norm["full_name"]
+        phone = norm["phone"]
+        if not y_id:
+            continue
 
+        p_clean = clean_phone_number(phone) if phone else ""
+
+        if y_id in pending_yandex_ids:
             if db_pool:
                 async with db_pool.acquire() as conn:
-                    if short9:
-                        row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 OR phone LIKE $2 LIMIT 1", y_id, f"%{short9}")
-                    else:
-                        row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 LIMIT 1", y_id)
-                    if row:
-                        u_id = row["id"]
-                        if y_id in pending_yandex_ids:
-                            await conn.execute("UPDATE users SET full_name=$1, car_model=$2, car_number=$3, updated_at=$4 WHERE id=$5", full_name, car_model, car_num, now, u_id)
-                        else:
-                            await conn.execute("UPDATE users SET full_name=$1, car_model=$2, car_number=$3, balance=$4, yandex_driver_id=$5, updated_at=$6 WHERE id=$7", full_name, car_model, car_num, bal, y_id, now, u_id)
-                        updated_count += 1
-                    else:
-                        new_pos = await db_generate_unique_position()
-                        await conn.execute(
-                            "INSERT INTO users (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at) "
-                            "VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$8) ON CONFLICT (position) DO NOTHING",
-                            full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now
-                        )
-                        inserted_count += 1
+                    await conn.execute(
+                        """UPDATE users SET full_name=$1, car_model=$2, car_number=$3, updated_at=$4
+                        WHERE yandex_driver_id=$5 OR phone=$6""",
+                        full_name, car_model, car_num, now, y_id, p_clean,
+                    )
             else:
                 conn = sqlite3.connect(DB_PATH, timeout=10)
-                conn.row_factory = sqlite3.Row
-                if short9:
-                    row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? OR phone LIKE ? LIMIT 1", (y_id, f"%{short9}")).fetchone()
-                else:
-                    row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? LIMIT 1", (y_id,)).fetchone()
-                if row:
-                    if y_id not in pending_yandex_ids:
-                        with conn:
-                            conn.execute("UPDATE users SET full_name=?, car_model=?, car_number=?, balance=?, yandex_driver_id=?, updated_at=? WHERE id=?", (full_name, car_model, car_num, bal, y_id, now, row["id"]))
-                    else:
-                        with conn:
-                            conn.execute("UPDATE users SET full_name=?, car_model=?, car_number=?, updated_at=? WHERE id=?", (full_name, car_model, car_num, now, row["id"]))
-                    updated_count += 1
-                else:
-                    new_pos = await db_generate_unique_position()
-                    with conn:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO users (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at) "
-                            "VALUES (?,?,?,?,?,?,?,0,?,?)",
-                            (full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now, now)
-                        )
-                    inserted_count += 1
+                with conn:
+                    conn.execute(
+                        """UPDATE users SET full_name=?, car_model=?, car_number=?, updated_at=?
+                        WHERE yandex_driver_id=? OR phone=?""",
+                        (full_name, car_model, car_num, now, y_id, p_clean),
+                    )
+                conn.close()
+        else:
+            if db_pool:
+                async with db_pool.acquire() as conn:
+                    res = await conn.execute(
+                        """UPDATE users SET 
+                            full_name=$1, car_model=$2, car_number=$3, 
+                            balance=$4, yandex_driver_id=$5, updated_at=$6 
+                        WHERE (yandex_driver_id=$5 OR phone=$7) AND (balance != $4 OR car_number != $3 OR yandex_driver_id IS NULL)""",
+                        full_name, car_model, car_num, bal, y_id, now, p_clean,
+                    )
+                    if res != "UPDATE 0":
+                        updated_count += 1
+            else:
+                conn = sqlite3.connect(DB_PATH, timeout=10)
+                with conn:
+                    cur = conn.execute(
+                        """UPDATE users SET 
+                            full_name=?, car_model=?, car_number=?, 
+                            balance=?, yandex_driver_id=?, updated_at=? 
+                        WHERE (yandex_driver_id=? OR phone=?) AND (balance != ? OR car_number != ? OR yandex_driver_id IS NULL)""",
+                        (full_name, car_model, car_num, bal, y_id, now, y_id, p_clean, bal, car_num),
+                    )
+                    if cur.rowcount > 0:
+                        updated_count += 1
                 conn.close()
 
-        p_len = len(pending_yandex_ids)
-        d_len = len(drivers)
-        await status_msg.edit_text(
-            f"✅ <b>Yandex sinxronlash yakunlandi!</b>\n\n"
-            f"🚕 Jami Yandex haydovchilari: <b>{d_len} ta</b>\n"
-            f"🆕 Yangi kiritilgan: <b>{inserted_count} ta</b>\n"
-            f"🔄 Yangilangan: <b>{updated_count} ta</b>\n"
-            f"🔒 Ariza kutilayotgan: <b>{p_len} ta</b>"
-        )
-    except Exception as e:
-        logger.error(f"Sync xatosi: {e}")
-        try:
-            err_str = esc(str(e))
-            await status_msg.edit_text(f"❌ Xatolik: <code>{err_str}</code>")
-        except Exception:
-            pass
+    tot_drv = len(drivers)
+    await status_msg.edit_text(
+        f"✅ <b>Yandex sinxronlash muvaffaqiyatli yakunlandi!</b>\n\n"
+        f"🚕 Jami Yandex haydovchilari: <b>{tot_drv} ta</b>\n"
+        f"🔄 Yangilanganlar: <b>{updated_count} ta</b>\n"
+        f"🔒 Arizasi ko'rib chiqilayotganlar: <b>{len(pending_yandex_ids)} ta</b>"
+    )
 
 
 @admin_router.message(F.text.in_(["👥 Haydovchilar", "👥 Водители"]))
 async def admin_list_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    wait_msg = await message.answer("⏳ <i>Botga ulangan haydovchilar ro'yxati va jonli holati olinmoqda...</i>")
+    wait_msg = await message.answer("⏳ <i>Haydovchilar ro'yxati va real vaqtdagi balanslar olinmoqda...</i>")
 
-    drivers = await db_get_all_bot_drivers()
+    y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=True)
+    y_map_by_id = {}
+    y_map_by_phone = {}
+    for raw in y_drivers:
+        norm = yandex_api._normalize(raw)
+        if norm.get("id"):
+            y_map_by_id[norm["id"]] = norm
+        if norm.get("phone"):
+            p_dig = re.sub(r"\D", "", norm["phone"])[-9:]
+            y_map_by_phone[p_dig] = norm
 
-    y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=False)
-    y_map_by_id = {d.get("driver_profile", {}).get("id"): yandex_api._normalize(d) for d in y_drivers}
-    y_map_by_phone = {re.sub(r"\D", "", n.get("phone", ""))[-9:]: n for n in y_map_by_id.values() if n.get("phone")}
-
+    drivers = await db_get_all_registered_drivers()
     try:
         await wait_msg.delete()
     except Exception:
         pass
 
     if not drivers:
-        await message.answer("Hozircha botda haydovchi yo'q.")
+        await message.answer("Hozircha ro'yxatdan o'tgan haydovchilar yo'q.")
         return
 
-    d_total = len(drivers)
-    await message.answer(f"👥 <b>Botga Ulangan Haydovchilar (Jami: {d_total} ta) — Real vaqt:</b>")
+    now_iso = tashkent_now_iso()
+    text = f"👥 <b>Barcha Haydovchilar Ro'yxati (Real vaqt | Jami: {len(drivers)} ta):</b>\n\n"
 
-    chunk_size = 10
-    for chunk_start in range(0, d_total, chunk_size):
-        chunk = drivers[chunk_start:chunk_start + chunk_size]
-        text = ""
-        for idx, drv in enumerate(chunk, chunk_start + 1):
-            y_id = drv.get("yandex_driver_id")
-            y_info = y_map_by_id.get(y_id) if y_id else None
-            if not y_info and drv.get("phone"):
-                ph9 = re.sub(r"\D", "", drv.get("phone", ""))[-9:]
-                y_info = y_map_by_phone.get(ph9)
+    for idx, drv in enumerate(drivers, 1):
+        d_id = drv["id"]
+        d_pos = drv.get("position", "N/A")
+        d_name = drv.get("full_name", "Haydovchi")
+        d_phone = drv.get("phone", "")
+        d_model = drv.get("car_model", "")
+        d_num = drv.get("car_number", "")
+        d_card_mask = mask_card(drv.get("card_number", ""))
 
-            if y_info:
-                status = y_info.get("status_text", "⚪ Offline")
-                bal_str = fmt_sum(y_info.get("balance", 0))
-            else:
-                status = "⚪ Offline"
-                bal_str = fmt_sum(drv.get("balance", 0))
+        y_id = drv.get("yandex_driver_id")
+        p_dig = re.sub(r"\D", "", d_phone)[-9:] if d_phone else ""
+        y_info = y_map_by_id.get(y_id) or y_map_by_phone.get(p_dig)
 
-            card_str = mask_card(drv.get("card_number", ""))
-            pos = drv.get("position", "N/A")
-            fn = esc(drv.get("full_name", "Haydovchi"))
-            ph = esc(drv.get("phone", ""))
-            cm = esc(drv.get("car_model", ""))
-            cn = esc(drv.get("car_number", ""))
+        if y_info:
+            live_bal = int(y_info["balance"])
+            bal_str = f"{fmt_sum(live_bal)} so'm 🟢"
+            has_pending = await db_has_pending_withdrawal(d_id)
+            if not has_pending and int(drv.get("balance", 0) or 0) != live_bal:
+                await db_update_balance(drv["telegram_id"], live_bal)
+            if not y_id and y_info.get("id"):
+                if db_pool:
+                    async with db_pool.acquire() as conn:
+                        await conn.execute("UPDATE users SET yandex_driver_id=$1, updated_at=$2 WHERE id=$3", y_info["id"], now_iso, d_id)
+                else:
+                    conn = sqlite3.connect(DB_PATH, timeout=10)
+                    with conn:
+                        conn.execute("UPDATE users SET yandex_driver_id=?, updated_at=? WHERE id=?", (y_info["id"], now_iso, d_id))
+                    conn.close()
+        else:
+            bal_str = f"{fmt_sum(drv.get('balance', 0))} so'm"
 
-            text += (
-                f"<b>{idx}.</b> {status} | 🆔 <code>{pos}</code> — <b>{fn}</b>\n"
-                f"   📱 <code>{ph}</code> | 🚗 {cm} ({cn})\n"
-                f"   💳 <code>{card_str}</code> | 💰 Balans: <b>{bal_str} so'm</b>\n"
-                f"---------------------------\n"
-            )
-        if text:
+        item = (
+            f"<b>{idx}.</b> 🆔 <code>{d_pos}</code> — <b>{d_name}</b>\n"
+            f"   📱 {d_phone} | 🚗 {d_model} ({d_num})\n"
+            f"   💳 {d_card_mask} | 💰 Balans: <b>{bal_str}</b>\n---------------------------\n"
+        )
+        if len(text) + len(item) > 4000:
             await message.answer(text)
-            await asyncio.sleep(0.2)
+            text = ""
+        text += item
+
+    if text:
+        await message.answer(text)
 
 
-@admin_router.message(F.text.in_(["🗑 Haydovchini o'chirish", "🗑 Удалить водителя", "🗑 Удалить"]), StateFilter("*"))
+@admin_router.message(F.text.in_(["🗑 Haydovchini o'chirish", "🗑 Удалить водителя"]), StateFilter("*"))
 async def admin_delete_driver_prompt(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
     await state.set_state(AdminDeleteDriverStates.waiting_for_query)
     lang = await get_lang(message.from_user.id)
-    await message.answer("🗑 <b>Haydovchini o'chirish:</b>\n\nPOSITION ID yoki telefon yuboring:", reply_markup=cancel_kb(lang))
+    await message.answer(
+        "🗑 <b>Haydovchini o'chirish bo'limi:</b>\n\n"
+        "O'chirmoqchi bo'lgan haydovchining <b>POSITION ID</b>sini (masalan: <code>LCH-1416</code>) "
+        "yoki <b>Telefon raqami</b>ni yuboring:\n\n"
+        "<i>Bekor qilish uchun '❌ Bekor qilish' tugmasini bosing.</i>",
+        reply_markup=cancel_kb(lang)
+    )
 
 
 @admin_router.message(AdminDeleteDriverStates.waiting_for_query)
@@ -2483,32 +2731,39 @@ async def admin_delete_driver_find(message: Message, state: FSMContext) -> None:
     lang = await get_lang(message.from_user.id)
     if message.text in CANCEL_TEXTS:
         await state.clear()
-        await message.answer("❌ Bekor qilindi.", reply_markup=admin_main_kb(lang))
+        await message.answer("❌ Amaliyot bekor qilindi.", reply_markup=admin_main_kb(lang))
         return
-    driver = await db_find_driver_by_query((message.text or "").strip())
+
+    query = (message.text or "").strip()
+    driver = await db_find_driver_by_query(query)
     if not driver:
-        msg_t = esc(message.text)
-        await message.answer(f"❌ '{msg_t}' topilmadi!", reply_markup=cancel_kb(lang))
+        await message.answer(
+            f"❌ <b>'{query}' bo'yicha haydovchi topilmadi!</b>\nIltimos, POSITION ID yoki telefonni to'g'ri kiriting:",
+            reply_markup=cancel_kb(lang)
+        )
         return
+
     await state.clear()
-    pos = driver.get("position", "N/A")
-    fn = esc(driver.get("full_name", ""))
-    ph = esc(driver.get("phone", ""))
-    cm = esc(driver.get("car_model", ""))
-    cn = esc(driver.get("car_number", ""))
-    b_val = fmt_sum(driver.get("balance", 0))
+    d_id = driver["id"]
+    d_pos = driver.get("position", "N/A")
+    d_name = driver.get("full_name", "Haydovchi")
+    d_phone = driver.get("phone", "")
+    d_car = f"{driver.get('car_model','')} ({driver.get('car_number','')})"
+    d_bal = fmt_sum(driver.get("balance", 0))
 
     info_txt = (
-        f"⚠ <b>O'chirasizmi?</b>\n\n"
-        f"🆔 <code>{pos}</code>\n"
-        f"👤 <b>{fn}</b>\n"
-        f"📱 <code>{ph}</code>\n"
-        f"🚗 {cm} ({cn})\n"
-        f"💰 {b_val}"
+        f"⚠️ <b>Haqiqatdan ham ushbu haydovchini o'chirmoqchimisiz?</b>\n\n"
+        f"🆔 POSITION: <code>{d_pos}</code>\n"
+        f"👤 Ism: <b>{d_name}</b>\n"
+        f"📱 Telefon: <code>{d_phone}</code>\n"
+        f"🚗 Mashina: <b>{d_car}</b>\n"
+        f"💰 Joriy balans: <b>{d_bal} so'm</b>\n\n"
+        f"<i>Diqqat: Haydovchi va uning arizalari bazadan butunlay o'chiriladi.</i>"
     )
+
     confirm_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🗑 Ha, o'chirish", callback_data=f"del_confirm:{driver['id']}"),
-        InlineKeyboardButton(text="❌ Bekor", callback_data="del_cancel")
+        InlineKeyboardButton(text="🗑 Ha, o'chirish", callback_data=f"del_confirm:{d_id}"),
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data="del_cancel"),
     ]])
     await message.answer(info_txt, reply_markup=confirm_kb)
 
@@ -2518,18 +2773,19 @@ async def admin_delete_driver_confirm(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await callback.answer("Ruxsat yo'q!", show_alert=True)
         return
+
     user_id = int(callback.data.split(":")[1])
     success = await db_delete_user_by_id(user_id)
     if success:
-        await callback.message.edit_text("✅ <b>O'chirildi!</b>")
+        await callback.message.edit_text("✅ <b>Haydovchi bazadan muvaffaqiyatli o'chirildi!</b>")
     else:
-        await callback.message.edit_text("❌ Xatolik.")
+        await callback.message.edit_text("❌ O'chirishda xatolik yuz berdi.")
     await callback.answer("Bajarildi!")
 
 
 @admin_router.callback_query(F.data == "del_cancel")
 async def admin_delete_driver_cancel(callback: CallbackQuery):
-    await callback.message.edit_text("❌ Bekor qilindi.")
+    await callback.message.edit_text("❌ Haydovchini o'chirish bekor qilindi.")
     await callback.answer()
 
 
@@ -2539,7 +2795,7 @@ async def admin_broadcast_prompt(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(AdminBroadcastStates.waiting_for_message)
     lang = await get_lang(message.from_user.id)
-    await message.answer("📢 <b>Barcha botdagi haydovchilarga yuboriladigan xabarni yozing:</b>", reply_markup=cancel_kb(lang))
+    await message.answer("📢 <b>Barcha haydovchilarga yubormoqchi bo'lgan xabaringizni yozing:</b>\n\n<i>Bekor qilish: '❌ Bekor qilish'</i>", reply_markup=cancel_kb(lang))
 
 
 @admin_router.message(AdminBroadcastStates.waiting_for_message)
@@ -2549,30 +2805,23 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
     lang = await get_lang(message.from_user.id)
     if message.text in CANCEL_TEXTS:
         await state.clear()
-        await message.answer("❌ Bekor qilindi.", reply_markup=admin_main_kb(lang))
+        await message.answer("❌ Xabar tarqatish bekor qilindi.", reply_markup=admin_main_kb(lang))
         return
     await state.clear()
-    users = await db_get_bot_users_for_broadcast()
-    u_len = len(users)
-    status_msg = await message.answer(f"⏳ <i>{u_len} ta haydovchiga yuborilmoqda...</i>")
-    sent = 0
-    fail = 0
+    users = await db_get_all_users()
+    status_msg = await message.answer("⏳ <i>Xabar barcha haydovchilarga yuborilmoqda...</i>")
+    sent = fail = 0
     for u in users:
         tg_id = u.get("telegram_id")
         if tg_id and tg_id > 0:
             try:
                 await bot.copy_message(chat_id=tg_id, from_chat_id=message.chat.id, message_id=message.message_id)
                 sent += 1
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.08)
             except Exception:
                 fail += 1
-    await status_msg.edit_text(
-        f"📢 <b>Xabar tarqatish yakunlandi!</b>\n\n"
-        f"✅ Yetkazildi: <b>{sent} ta</b>\n"
-        f"❌ Yetmadi (bloklagan): <b>{fail} ta</b>\n"
-        f"📊 Jami bot foydalanuvchisi: <b>{u_len} ta</b>"
-    )
-    await message.answer("🛠 <b>Admin Panel:</b>", reply_markup=admin_main_kb(lang))
+    await status_msg.edit_text(f"📢 <b>Xabar tarqatish yakunlandi!</b>\n\n✅ Yetkazildi: <b>{sent} ta</b>\n❌ Yetib bormadi: <b>{fail} ta</b>")
+    await message.answer("🛠 <b>Admin Paneli:</b>", reply_markup=admin_main_kb(lang))
 
 
 @admin_router.message(F.text.in_(["🚫 Nofaollar", "🚫 Неактивные"]))
@@ -2583,9 +2832,7 @@ async def admin_inactive_drivers(message: Message) -> None:
     if db_pool:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users "
-                "WHERE (is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '')) "
-                "AND (last_activity < $1 OR is_blocked=1) ORDER BY id DESC LIMIT 20",
+                "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE is_registered=1 AND (last_activity < $1 OR is_blocked=1) ORDER BY id DESC LIMIT 20",
                 ten_days_ago
             )
             inactive = [dict(r) for r in rows]
@@ -2593,34 +2840,26 @@ async def admin_inactive_drivers(message: Message) -> None:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         inactive = [dict(r) for r in conn.execute(
-            "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users "
-            "WHERE (is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '')) "
-            "AND (last_activity < ? OR is_blocked=1) ORDER BY id DESC LIMIT 20",
+            "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE is_registered=1 AND (last_activity < ? OR is_blocked=1) ORDER BY id DESC LIMIT 20",
             (ten_days_ago,)
         ).fetchall()]
         conn.close()
 
     if not inactive:
-        await message.answer("✅ Barcha faol!")
+        await message.answer("✅ Barcha haydovchilar faol!")
         return
-
-    in_len = len(inactive)
-    text = f"🚫 <b>10+ kundan beri nofaol ({in_len} ta):</b>\n\n"
+    text = f"🚫 <b>10+ kundan beri faol bo'lmagan ({len(inactive)} ta):</b>\n\n"
     for drv in inactive:
-        fn = esc(drv.get("full_name", ""))
-        ph = esc(drv.get("phone", ""))
-        cm = esc(drv.get("car_model", ""))
-        cn = esc(drv.get("car_number", ""))
-        act_date = str(drv.get("last_activity", ""))[:10]
-        text += (
-            f"👤 <b>{fn}</b> | 📱 {ph}\n"
-            f"🚗 {cm} ({cn})\n"
-            f"📅 {act_date}\n---\n"
-        )
+        d_name = drv.get("full_name", "Noma'lum")
+        d_phone = drv.get("phone", "")
+        d_model = drv.get("car_model", "")
+        d_num = drv.get("car_number", "")
+        d_act = str(drv.get("last_activity", "Noma'lum"))[:10]
+        text += f"👤 <b>{d_name}</b> | 📱 {d_phone}\n🚗 {d_model} ({d_num})\n📅 {d_act}\n---------------------------\n"
     await message.answer(text)
 
 
-@admin_router.message(F.text.in_(["⬅ Asosiy menyu", "⬅ Главное меню"]), StateFilter("*"))
+@admin_router.message(F.text.in_(["⬅️ Asosiy menyu", "⬅️ Главное меню"]), StateFilter("*"))
 async def back_to_user_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
     uid = message.from_user.id
@@ -2629,7 +2868,7 @@ async def back_to_user_menu(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# AVTOMATIK SCHEDULERLAR
+# 17. AVTOMATIK SCHEDULERLAR
 # ============================================================
 
 async def daily_morning_reminder():
@@ -2639,14 +2878,14 @@ async def daily_morning_reminder():
             now = datetime.now(TASHKENT_TZ)
             if now.hour == 8 and now.minute == 0 and now.day != last_sent_day:
                 last_sent_day = now.day
-                drivers = await db_get_bot_users_for_broadcast()
+                drivers = await db_get_all_registered_drivers()
                 text = (
-                    f"🕌 <b>Assalomu alaykum!</b>\n\n"
-                    f"🚕 <b>{BOT_NAME}</b> jamoasi eslatadi:\n"
-                    f"⚠ Yo'l qoidalariga amal qiling!\n"
-                    f"🤝 Xushmuomala bo'ling.\n"
-                    f"🧼 Avto tozaligiga e'tibor bering.\n\n"
-                    f"✨ <i>Xayrli kun!</i>"
+                    "🕌 <b>Assalomu alaykum hurmatli haydovchilar!</b>\n\n"
+                    f"🚕 <b>{BOT_NAME}</b> jamoasi eslatadi:\n\n"
+                    "⚠️ Yo'l qoidalariga qat'iy amal qiling!\n"
+                    "🤝 Mijozni manzilga yetkazish davomida xushmuomala bo'ling.\n"
+                    "🧼 Avtomobilingiz tozaligiga e'tibor bering.\n\n"
+                    "✨ <i>Barchangizga xayrli kun va barakali daromad tilaymiz!</i>"
                 )
                 for d in drivers:
                     tg_id = d.get("telegram_id")
@@ -2656,15 +2895,16 @@ async def daily_morning_reminder():
                             await asyncio.sleep(0.08)
                         except Exception:
                             pass
+                logger.info(f"Ertalabki eslatma {len(drivers)} ta haydovchiga yuborildi.")
         except Exception as e:
-            logger.error(f"daily reminder xatosi: {e}")
+            logger.error(f"daily_morning_reminder xatosi: {e}")
         await asyncio.sleep(30)
 
 
 async def yandex_auto_sync_scheduler():
     while True:
         try:
-            await asyncio.sleep(300)
+            await asyncio.sleep(60)
             drivers, _ = await yandex_api.get_all_drivers(force_refresh=True)
             if drivers:
                 pending_yandex_ids = await db_get_pending_yandex_ids()
@@ -2673,54 +2913,54 @@ async def yandex_auto_sync_scheduler():
                     norm = yandex_api._normalize(raw_drv)
                     y_id = norm["id"]
                     bal = int(norm["balance"])
+                    car_num = norm["car_number"]
+                    car_model = norm["car_model"]
+                    full_name = norm["full_name"]
+                    phone = norm["phone"]
+                    p_clean = clean_phone_number(phone) if phone else ""
                     if not y_id:
                         continue
-                    p_clean = clean_phone_number(norm["phone"]) if norm["phone"] else ""
-                    short9 = p_clean[-9:] if p_clean else ""
-                    if db_pool:
-                        async with db_pool.acquire() as conn:
-                            if short9:
-                                row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 OR phone LIKE $2 LIMIT 1", y_id, f"%{short9}")
-                            else:
-                                row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 LIMIT 1", y_id)
-                            if row:
-                                if y_id not in pending_yandex_ids:
-                                    await conn.execute(
-                                        "UPDATE users SET full_name=$1, car_model=$2, car_number=$3, balance=$4, yandex_driver_id=$5, updated_at=$6 WHERE id=$7",
-                                        norm["full_name"], norm["car_model"], norm["car_number"], bal, y_id, now, row["id"]
-                                    )
-                            else:
-                                new_pos = await db_generate_unique_position()
+
+                    if y_id in pending_yandex_ids:
+                        if db_pool:
+                            async with db_pool.acquire() as conn:
                                 await conn.execute(
-                                    "INSERT INTO users (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at) "
-                                    "VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$8) ON CONFLICT (position) DO NOTHING",
-                                    norm["full_name"], p_clean, norm["car_model"], norm["car_number"], new_pos, bal, y_id, now
+                                    """UPDATE users SET full_name=$1, car_model=$2, car_number=$3, updated_at=$4
+                                    WHERE yandex_driver_id=$5 OR phone=$6""",
+                                    full_name, car_model, car_num, now, y_id, p_clean,
                                 )
-                    else:
-                        conn = sqlite3.connect(DB_PATH, timeout=10)
-                        conn.row_factory = sqlite3.Row
-                        if short9:
-                            row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? OR phone LIKE ? LIMIT 1", (y_id, f"%{short9}")).fetchone()
                         else:
-                            row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? LIMIT 1", (y_id,)).fetchone()
-                        if row:
-                            if y_id not in pending_yandex_ids:
-                                with conn:
-                                    conn.execute(
-                                        "UPDATE users SET full_name=?, car_model=?, car_number=?, balance=?, yandex_driver_id=?, updated_at=? WHERE id=?",
-                                        (norm["full_name"], norm["car_model"], norm["car_number"], bal, y_id, now, row["id"])
-                                    )
-                        else:
-                            new_pos = await db_generate_unique_position()
+                            conn = sqlite3.connect(DB_PATH, timeout=10)
                             with conn:
                                 conn.execute(
-                                    "INSERT OR IGNORE INTO users (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at) "
-                                    "VALUES (?,?,?,?,?,?,?,0,?,?)",
-                                    (norm["full_name"], p_clean, norm["car_model"], norm["car_number"], new_pos, bal, y_id, now, now)
+                                    """UPDATE users SET full_name=?, car_model=?, car_number=?, updated_at=?
+                                    WHERE yandex_driver_id=? OR phone=?""",
+                                    (full_name, car_model, car_num, now, y_id, p_clean),
                                 )
-                        conn.close()
+                            conn.close()
+                    else:
+                        if db_pool:
+                            async with db_pool.acquire() as conn:
+                                await conn.execute(
+                                    """UPDATE users SET 
+                                        full_name=$1, car_model=$2, car_number=$3, 
+                                        balance=$4, yandex_driver_id=$5, updated_at=$6 
+                                    WHERE (yandex_driver_id=$5 OR phone=$7) AND (balance != $4 OR car_number != $3 OR yandex_driver_id IS NULL)""",
+                                    full_name, car_model, car_num, bal, y_id, now, p_clean,
+                                )
+                        else:
+                            conn = sqlite3.connect(DB_PATH, timeout=10)
+                            with conn:
+                                conn.execute(
+                                    """UPDATE users SET 
+                                        full_name=?, car_model=?, car_number=?, 
+                                        balance=?, yandex_driver_id=?, updated_at=? 
+                                    WHERE (yandex_driver_id=? OR phone=?) AND (balance != ? OR car_number != ? OR yandex_driver_id IS NULL)""",
+                                    (full_name, car_model, car_num, bal, y_id, now, y_id, p_clean, bal, car_num),
+                                )
+                            conn.close()
         except Exception as e:
-            logger.error(f"Avtomatik sync xatosi: {e}")
+            logger.error(f"Avtomatik fon sinxronlash xatosi: {e}")
 
 
 async def monthly_report_scheduler():
@@ -2731,20 +2971,26 @@ async def monthly_report_scheduler():
             if now.day == 1 and now.hour == 9 and now.month != last_report_month:
                 last_report_month = now.month
                 excel_bytes = await generate_monthly_excel_report()
-                m_name = UZ_MONTHS.get(now.month, "")
+                month_name = UZ_MONTHS.get(now.month, "Oy")
+                filename = f"Lochin_Taxi_{now.year}_{month_name}.xlsx"
+
                 for adm in ADMIN_IDS:
                     try:
-                        file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_{now.year}_{m_name}.xlsx")
-                        await bot.send_document(chat_id=adm, document=file, caption=f"🗓 <b>{now.year} {m_name} hisoboti</b>")
+                        file = BufferedInputFile(excel_bytes, filename=filename)
+                        await bot.send_document(
+                            chat_id=adm,
+                            document=file,
+                            caption=f"🗓 <b>{now.year}-yil {month_name} Oylik Hisoboti!</b>\n\nBarcha haydovchilar statistikasi va umumiy aylanma."
+                        )
                     except Exception:
                         pass
         except Exception as e:
-            logger.error(f"monthly report xatosi: {e}")
+            logger.error(f"Oylik hisobot scheduler xatosi: {e}")
         await asyncio.sleep(3600)
 
 
 # ============================================================
-# WEB SERVER VA ASOSIY RUNNER
+# 18. WEB SERVER (RENDER / DOCKER HEALTH CHECKS)
 # ============================================================
 
 routes = web.RouteTableDef()
@@ -2753,7 +2999,7 @@ routes = web.RouteTableDef()
 @routes.get("/")
 @routes.get("/health")
 async def health_check(request: web.Request) -> web.Response:
-    return web.Response(text="LOCHIN TAXI ENTERPRISE FIXED RUNNING ✅", status=200)
+    return web.Response(text="LOCHIN TAXI ENTERPRISE 24/7 IS RUNNING ✅", status=200)
 
 
 async def start_web_server():
@@ -2763,25 +3009,33 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"Web server 0.0.0.0:{PORT} portida ishga tushdi")
+    logger.info(f"Web server 0.0.0.0:{PORT} portida muvaffaqiyatli ishga tushdi.")
 
+
+# ============================================================
+# 19. MAIN ASYNC RUNNER
+# ============================================================
 
 async def main() -> None:
-    logger.info("Lochin Taxi FIXED ishga tushmoqda...")
+    logger.info("Lochin Taxi Bot ishga tushirilmoqda...")
     await init_database()
+
     dp.include_router(admin_router)
     dp.include_router(router)
+
     await start_web_server()
+
     asyncio.create_task(yandex_auto_sync_scheduler())
     asyncio.create_task(daily_morning_reminder())
     asyncio.create_task(monthly_report_scheduler())
+
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info(f"{BOT_NAME} tayyor!")
+    logger.info(f"{BOT_NAME} to'liq tayyor va yangilanishlarni kutmoqda!")
+
     try:
         await dp.start_polling(bot)
     finally:
         await yandex_api.close()
-        await kapital_bank_api.close()
         if db_pool:
             await db_pool.close()
 
