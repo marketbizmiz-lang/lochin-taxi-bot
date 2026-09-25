@@ -1240,7 +1240,7 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 5. KAPITALBANK INTEGRATSIYA (KUCHAYTIRILGAN)
+# 5. KAPITALBANK INTEGRATSIYA
 # ============================================================
 
 class KapitalBankAPI:
@@ -1704,7 +1704,7 @@ async def cmd_my_id(message: Message):
     await message.answer(
         f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
         f"👑 <b>Status:</b> {status_str}\n\n"
-        f"<i>Yuklangan barcha Admin IDlar:</i> <code>{list(ADMIN_IDS)}</code>"
+        f"<i>Agar bot sizni admin deb tanimasa, ushbu ID raqamni nusxalab oling va serverdagi <code>ADMIN_IDS</code> o'zgaruvchisiga qo'ying!</i>"
     )
 
 
@@ -1729,7 +1729,10 @@ async def global_cancel_handler(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     lang = user.get("language", "uz") if user else "uz"
-    kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else register_reply_kb(lang)
+    if is_admin(uid):
+        kb = user_main_kb(lang, uid)
+    else:
+        kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else register_reply_kb(lang)
     await message.answer(t(lang, "action_cancelled"), reply_markup=kb)
 
 
@@ -1738,6 +1741,17 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     uid = message.from_user.id
     await db_upsert_start(uid, message.from_user.username or "")
+
+    # AGAR ADMIN BO'LSA - UNGA DARHOL ASOSIY MENYU OCHILADI (Ro'yxatdan o'tishni so'ramaydi)
+    if is_admin(uid):
+        lang = await get_lang(uid)
+        await message.answer(
+            f"👑 <b>Xush kelibsiz, Bosh Admin!</b>\n\n"
+            f"Tizim to'liq ishchi holatda. Boshqaruv uchun quyidagi menyulardan foydalaning:",
+            reply_markup=user_main_kb(lang, uid)
+        )
+        return
+
     user = await db_get_user(uid)
     if user and user.get("is_registered") == 1:
         lang = user.get("language", "uz")
@@ -1760,6 +1774,12 @@ async def lang_callback(callback: CallbackQuery) -> None:
         await callback.message.delete()
     except Exception:
         pass
+
+    if is_admin(uid):
+        await callback.message.answer("👑 <b>Admin menyusi:</b>", reply_markup=user_main_kb(lang, uid))
+        await callback.answer()
+        return
+
     user = await db_get_user(uid)
     if user and user.get("is_registered") == 1:
         pos_id = user.get("position") or "N/A"
@@ -2096,7 +2116,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 14. PUL YECHISH (HAYDOVCHI VA ADMIN ANIQ AJRATILDI)
+# 14. PUL YECHISH
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -2223,7 +2243,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         return
 
     masked_c = mask_card(full_card)
-    # HAYDOVCHIGA FAQAT SHU XABAR CHIQADI (Bankka so'rov hali bormaydi!)
     await callback.message.edit_text(
         f"⏳ <b>Arizangiz qabul qilindi! (Ariza #{w_id})</b>\n\n"
         f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
@@ -2276,7 +2295,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
 
 # ============================================================
-# 15. ADMIN TASDIQLASH VA TO'LOV (BANK FAQAT SHU YERDA CHAQIRILADI)
+# 15. ADMIN TASDIQLASH VA TO'LOV
 # ============================================================
 
 @admin_router.callback_query(F.data.startswith("adm_kapital:"))
