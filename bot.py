@@ -499,10 +499,16 @@ async def db_finish_registration(
     if phone_clean == OWNER_PHONE:
         ADMIN_IDS.add(telegram_id)
 
-    existing = await db_get_user(telegram_id)
-    if existing and existing.get("position"):
-        position = existing["position"]
-    else:
+    # Avval shu telefon bilan Yandex sinxronlash orqali yaratilgan profil bormi tekshiramiz
+    existing_phone_user = await db_get_user_by_phone(phone_clean)
+    position = None
+    if existing_phone_user and existing_phone_user.get("position"):
+        position = existing_phone_user["position"]
+        # Agar oldin telegram_idsiz yozilgan bo'lsa, eski yozuvni tozalab yangisiga ulaymiz
+        if existing_phone_user.get("telegram_id") != telegram_id:
+            await db_delete_user_by_id(existing_phone_user["id"])
+
+    if not position:
         position = await db_generate_unique_position()
 
     if db_pool:
@@ -703,15 +709,20 @@ async def db_get_driver_today_withdrawn(user_id: int) -> int:
         return int(row[0] if row else 0)
 
 
-async def db_get_all_registered_drivers() -> List[dict]:
+# ============================================================
+# FAQAT BOTDAN RO'YXATDAN O'TGANLARNI OLISH (TUZATILDI)
+# ============================================================
+
+async def db_get_bot_registered_drivers() -> List[dict]:
+    """Faqat Telegram bot orqali ro'yxatdan o'tgan haqiqiy haydovchilarni qaytaradi!"""
     if db_pool:
         async with db_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM users WHERE is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '') ORDER BY id ASC")
+            rows = await conn.fetch("SELECT * FROM users WHERE is_registered = 1 AND telegram_id IS NOT NULL ORDER BY id ASC")
             return [_process_user_dict(dict(r)) for r in rows]
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM users WHERE is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '') ORDER BY id ASC").fetchall()
+        rows = conn.execute("SELECT * FROM users WHERE is_registered = 1 AND telegram_id IS NOT NULL ORDER BY id ASC").fetchall()
         conn.close()
         return [_process_user_dict(dict(r)) for r in rows]
 
@@ -736,9 +747,9 @@ async def db_get_stats() -> dict:
 
     if db_pool:
         async with db_pool.acquire() as conn:
-            total_users     = await conn.fetchval("SELECT COUNT(*) FROM users") or 0
-            registered      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '')") or 0
-            yandex_linked   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''") or 0
+            total_users     = await conn.fetchval("SELECT COUNT(*) FROM users WHERE telegram_id IS NOT NULL") or 0
+            registered      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_registered=1 AND telegram_id IS NOT NULL") or 0
+            yandex_linked   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!='' AND telegram_id IS NOT NULL") or 0
 
             today_withdrawn = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= $1", today_start) or 0
             month_withdrawn = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= $1", month_start) or 0
@@ -749,9 +760,9 @@ async def db_get_stats() -> dict:
             total_comm      = await conn.fetchval("SELECT COALESCE(SUM(commission),0) FROM withdrawals WHERE status='completed'") or 0
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
-        total_users     = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        registered      = conn.execute("SELECT COUNT(*) FROM users WHERE is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '')").fetchone()[0]
-        yandex_linked   = conn.execute("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!=''").fetchone()[0]
+        total_users     = conn.execute("SELECT COUNT(*) FROM users WHERE telegram_id IS NOT NULL").fetchone()[0]
+        registered      = conn.execute("SELECT COUNT(*) FROM users WHERE is_registered=1 AND telegram_id IS NOT NULL").fetchone()[0]
+        yandex_linked   = conn.execute("SELECT COUNT(*) FROM users WHERE yandex_driver_id IS NOT NULL AND yandex_driver_id!='' AND telegram_id IS NOT NULL").fetchone()[0]
 
         today_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= ?", (today_start,)).fetchone()[0]
         month_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= ?", (month_start,)).fetchone()[0]
@@ -837,7 +848,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (BARCHA 700+ HAYDOVCHILARNI CHEKLOVSIZ YUKLASH)
+# 4. YANDEX FLEET API (KUCHAYTIRILGAN TO'LIQ 700+ TORTISH DVIJOGI)
 # ============================================================
 
 class YandexFleetAPI:
@@ -946,10 +957,35 @@ class YandexFleetAPI:
             "raw": raw_driver,
         }
 
+    async def _fetch_drivers_page(self, session: aiohttp.ClientSession, cursor: Optional[str] = None, work_status: Optional[str] = None) -> Tuple[List[dict], Optional[str]]:
+        url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
+        query_dict: Dict[str, Any] = {"park": {"id": self.park_id}}
+        if work_status:
+            query_dict["park"]["driver_profile"] = {"work_status": [work_status]}
+
+        payload: Dict[str, Any] = {
+            "limit": 500,
+            "query": query_dict
+        }
+        if cursor:
+            payload["cursor"] = cursor
+
+        async with session.post(url, json=payload) as resp:
+            text = await resp.text()
+            if resp.status == 200:
+                data = json.loads(text)
+                batch = data.get("driver_profiles", [])
+                next_c = data.get("cursor")
+                return batch, next_c
+            else:
+                logger.warning(f"Yandex fetch page status {resp.status}: {text[:120]}")
+                return [], None
+
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
         """
-        Barcha 700+ (va undan ko'p) haydovchilarni to'liq tortib olish.
-        Yandex Fleet API cursor hamda fallback offset mexanizmlari bilan ishlaydi.
+        Barcha 700+ haydovchilarni to'liq tortib olish (Universal usul):
+        1) Cursor orqali tortishga urinadi.
+        2) Agar 500 tadan oshmasa, work_status (working, fired, not_working) bo'yicha ham tortib birlashtiradi.
         """
         if not self._is_configured():
             return [], "Yandex API sozlamalari (.env) to'liq kiritilmagan!"
@@ -959,68 +995,54 @@ class YandexFleetAPI:
                 and (now - self._cache_ts).total_seconds() < self._cache_ttl):
             return self._drivers_cache, ""
 
-        url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
-        all_drivers: List[dict] = []
-        seen_ids: Set[str] = set()
+        all_drivers_map: Dict[str, dict] = {}
+        session = await self._get_session()
         last_error = ""
-        cursor: Optional[str] = None
 
         try:
-            session = await self._get_session()
-            for page in range(40):  # 40 * 500 = 20 000 tagacha haydovchi sig'imi
-                payload: Dict[str, Any] = {
-                    "limit": 500,
-                    "query": {
-                        "park": {
-                            "id": self.park_id
-                        }
-                    }
-                }
-                if cursor:
-                    payload["cursor"] = cursor
+            # 1-Bosqich: Standart cursor bilan tortish
+            cursor = None
+            for _ in range(15):
+                batch, next_c = await self._fetch_drivers_page(session, cursor=cursor)
+                if not batch:
+                    break
+                for drv in batch:
+                    d_id = drv.get("driver_profile", {}).get("id") or drv.get("id")
+                    if d_id:
+                        all_drivers_map[d_id] = drv
 
-                async with session.post(url, json=payload) as resp:
-                    text = await resp.text()
-                    if resp.status == 429:
-                        last_error = "HTTP 429: So'rovlar limiti oshdi"
-                        logger.warning("Yandex rate limit (429), kutib qayta urinilmoqda...")
-                        await asyncio.sleep(1.0)
-                        continue
-                    elif resp.status != 200:
-                        last_error = f"HTTP {resp.status}: {text[:150]}"
-                        logger.error(f"Yandex get_all_drivers error: {last_error}")
-                        break
+                if not next_c or next_c == cursor or len(batch) < 500:
+                    break
+                cursor = next_c
+                await asyncio.sleep(0.05)
 
-                    data = json.loads(text)
-                    batch = data.get("driver_profiles", [])
-                    if not batch:
-                        break
+            # 2-Bosqich: Agar hali ham 500 tadan oshmagan bo'lsa (Yandex filtri cheklovi bo'lsa)
+            if len(all_drivers_map) <= 500:
+                logger.info("Cursor 500 tadan oshmadi, work_status bo'yicha to'ldirilmoqda...")
+                for ws in ["working", "not_working", "fired"]:
+                    cursor = None
+                    for _ in range(10):
+                        batch, next_c = await self._fetch_drivers_page(session, cursor=cursor, work_status=ws)
+                        if not batch:
+                            break
+                        for drv in batch:
+                            d_id = drv.get("driver_profile", {}).get("id") or drv.get("id")
+                            if d_id:
+                                all_drivers_map[d_id] = drv
+                        if not next_c or next_c == cursor or len(batch) < 500:
+                            break
+                        cursor = next_c
+                        await asyncio.sleep(0.05)
 
-                    new_added = 0
-                    for drv in batch:
-                        d_id = drv.get("driver_profile", {}).get("id") or drv.get("id")
-                        if d_id and d_id not in seen_ids:
-                            seen_ids.add(d_id)
-                            all_drivers.append(drv)
-                            new_added += 1
-
-                    # Yandex javobidagi cursor tekshiruvi:
-                    new_cursor = data.get("cursor") or data.get("next_cursor")
-                    
-                    # Agar yangi haydovchi qo'shilmagan bo'lsa yoki cursor o'zgarmasa yoki bo'sh bo'lsa, tugatamiz
-                    if not new_cursor or new_cursor == cursor or len(batch) < 500:
-                        break
-
-                    cursor = new_cursor
-                    await asyncio.sleep(0.05)
         except Exception as e:
-            last_error = f"Ulanish xatosi: {str(e)}"
-            logger.error(f"Yandex get_all_drivers exception: {e}")
+            last_error = f"Ulanish xatosi: {e}"
+            logger.error(f"Yandex get_all_drivers xatosi: {e}")
 
-        if all_drivers:
-            self._drivers_cache = all_drivers
+        result_list = list(all_drivers_map.values())
+        if result_list:
+            self._drivers_cache = result_list
             self._cache_ts = now
-            return all_drivers, ""
+            return result_list, ""
 
         if self._drivers_cache:
             return self._drivers_cache, ""
@@ -1381,14 +1403,14 @@ kapital_bank_api = KapitalBankAPI()
 
 
 # ============================================================
-# 6. EXCEL HISOBOT
+# 6. EXCEL HISOBOT (FAQAT BOT RO'YXATDAN O'TGANLAR)
 # ============================================================
 
 async def generate_monthly_excel_report() -> bytes:
     y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=False)
     y_map_by_id = {d.get("driver_profile", {}).get("id"): yandex_api._normalize(d) for d in y_drivers}
 
-    drivers = await db_get_all_registered_drivers()
+    drivers = await db_get_bot_registered_drivers()
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Lochin Taxi Hisoboti"
@@ -1467,7 +1489,7 @@ async def generate_monthly_excel_report() -> bytes:
 
     last_row = len(drivers) + 2
     ws.append([
-        "JAMI", "", f"{len(drivers)} ta haydovchi", "", "", "", "",
+        "JAMI", "", f"{len(drivers)} ta bot haydovchisi", "", "", "", "",
         total_orders, total_earn, total_comm_sum, total_bal, ""
     ])
     ws.row_dimensions[last_row].height = 24
@@ -1633,7 +1655,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
          KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет")],
         [KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация Яндекс"),
          KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка")],
-        [KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители"),
+        [KeyboardButton(text="👥 Haydovchilar (Botdan o'tganlar)" if is_uz else "👥 Водители (Бота)"),
          KeyboardButton(text="🗑 Haydovchini o'chirish" if is_uz else "🗑 Удалить водителя")],
         [KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные")],
         [KeyboardButton(text="⬅️ Asosiy menyu" if is_uz else "⬅️ Главное меню")],
@@ -1982,7 +2004,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
     yandex_txt = "Ulangan ✅" if y_id else "Ulanmagan ❌"
 
     admin_alert = (
-        f"🆕 <b>YANGI HAYDOVCHI RO'YXATDAN O'TDI!</b>\n\n"
+        f"🆕 <b>YANGI HAYDOVCHI BOTDAN RO'YXATDAN O'TDI!</b>\n\n"
         f"🆔 POSITION: <code>{position}</code>\n"
         f"👤 <b>Haydovchi:</b> {esc(full_name)}\n"
         f"📱 <b>Telefon:</b> <code>{esc(phone)}</code>\n"
@@ -2139,7 +2161,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 14. PUL YECHISH (AVTOMATIK ASOSIY MENYUGA QAYTISH BILAN)
+# 14. PUL YECHISH
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -2769,8 +2791,8 @@ async def admin_stats_handler(message: Message) -> None:
 
     await message.answer(
         f"📊 <b>{BOT_NAME} — To'liq Tizim Statistikasi:</b>\n\n"
-        f"👥 Jami bot foydalanuvchilari: <b>{tot_u} ta</b>\n"
-        f"🚕 Ro'yxatdan o'tgan haydovchilar: <b>{reg_d} ta</b>\n"
+        f"👥 Botga kirgan foydalanuvchilar: <b>{tot_u} ta</b>\n"
+        f"🚕 <b>Botdan ro'yxatdan o'tgan haydovchilar:</b> <b>{reg_d} ta</b>\n"
         f"🔗 Yandex Pro ulangan: <b>{y_lnk} ta</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"📅 <b>Bugun yechilgan summa:</b> <b>{td_w} so'm</b>\n"
@@ -2797,7 +2819,7 @@ async def admin_export_excel(message: Message) -> None:
                 await bot.send_document(
                     chat_id=adm,
                     document=file,
-                    caption=f"📊 <b>{now.year}-yil {month_name} oyi Lochin Taxi hisoboti!</b>\n<i>(Kartalar xavfsiz maskalangan, jonli balanslar ko'rsatilgan)</i>"
+                    caption=f"📊 <b>{now.year}-yil {month_name} oyi Lochin Taxi hisoboti!</b>\n<i>(Faqat botdan ro'yxatdan o'tgan haydovchilar ko'rsatilgan)</i>"
                 )
             except Exception:
                 pass
@@ -2815,7 +2837,7 @@ async def admin_export_excel(message: Message) -> None:
 async def admin_sync_all_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar to'liq tortib olinmoqda (Cheklovlarsiz)...</i>")
+    status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha 700+ haydovchilar to'liq qidirilmoqda (Cheklovlarsiz)...</i>")
 
     try:
         drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
@@ -2823,8 +2845,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
             err_detail = err_msg if err_msg else "Noma'lum xatolik"
             await status_msg.edit_text(
                 f"❌ <b>Yandex API dan ma'lumot olib bo'lmadi!</b>\n\n"
-                f"🔍 <b>Xatolik sababi:</b>\n<code>{esc(err_detail)}</code>\n\n"
-                f"📌 <i>Yandex so'rovlar limiti birozdan so'ng yangilanadi.</i>"
+                f"🔍 <b>Xatolik sababi:</b>\n<code>{esc(err_detail)}</code>"
             )
             return
 
@@ -2851,12 +2872,12 @@ async def admin_sync_all_drivers(message: Message) -> None:
                 async with db_pool.acquire() as conn:
                     if p_clean:
                         row = await conn.fetchrow(
-                            "SELECT id FROM users WHERE yandex_driver_id=$1 OR phone=$2 LIMIT 1",
+                            "SELECT id, is_registered, telegram_id FROM users WHERE yandex_driver_id=$1 OR phone=$2 LIMIT 1",
                             y_id, p_clean
                         )
                     else:
                         row = await conn.fetchrow(
-                            "SELECT id FROM users WHERE yandex_driver_id=$1 LIMIT 1",
+                            "SELECT id, is_registered, telegram_id FROM users WHERE yandex_driver_id=$1 LIMIT 1",
                             y_id
                         )
                     existing_user = dict(row) if row else None
@@ -2865,12 +2886,12 @@ async def admin_sync_all_drivers(message: Message) -> None:
                 conn.row_factory = sqlite3.Row
                 if p_clean:
                     row = conn.execute(
-                        "SELECT id FROM users WHERE yandex_driver_id=? OR phone=? LIMIT 1",
+                        "SELECT id, is_registered, telegram_id FROM users WHERE yandex_driver_id=? OR phone=? LIMIT 1",
                         (y_id, p_clean)
                     ).fetchone()
                 else:
                     row = conn.execute(
-                        "SELECT id FROM users WHERE yandex_driver_id=? LIMIT 1",
+                        "SELECT id, is_registered, telegram_id FROM users WHERE yandex_driver_id=? LIMIT 1",
                         (y_id,)
                     ).fetchone()
                 existing_user = dict(row) if row else None
@@ -2878,6 +2899,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
 
             if existing_user:
                 u_id = existing_user["id"]
+                # Faqat balans va ma'lumotlarni yangilaymiz, lekin is_registered ga tegmaymiz!
                 if y_id in pending_yandex_ids:
                     if db_pool:
                         async with db_pool.acquire() as conn:
@@ -2914,13 +2936,15 @@ async def admin_sync_all_drivers(message: Message) -> None:
                         conn.close()
                 updated_count += 1
             else:
+                # E'TIBOR BERING: Yangi Yandex haydovchilari bazaga is_registered=0 bo'lib tushadi!
+                # Botga kirib ro'yxatdan o'tmaguncha ular "Haydovchilar" ro'yxatida ko'rinmaydi!
                 new_pos = await db_generate_unique_position()
                 if db_pool:
                     async with db_pool.acquire() as conn:
                         await conn.execute(
                             """INSERT INTO users 
                                 (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $8)
                             ON CONFLICT (position) DO NOTHING""",
                             full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now
                         )
@@ -2930,7 +2954,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
                         conn.execute(
                             """INSERT OR IGNORE INTO users 
                                 (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
                             (full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now, now)
                         )
                     conn.close()
@@ -2938,11 +2962,12 @@ async def admin_sync_all_drivers(message: Message) -> None:
 
         tot_drv = len(drivers)
         await status_msg.edit_text(
-            f"✅ <b>Yandex sinxronlash muvaffaqiyatli yakunlandi!</b>\n\n"
-            f"🚕 Jami Yandex haydovchilari: <b>{tot_drv} ta</b>\n"
-            f"🆕 Bazaga yangi kiritilganlar: <b>{inserted_count} ta</b>\n"
-            f"🔄 Yangilanganlar: <b>{updated_count} ta</b>\n"
-            f"🔒 Arizasi ko'rib chiqilayotganlar: <b>{len(pending_yandex_ids)} ta</b>"
+            f"✅ <b>Yandex sinxronlash to'liq yakunlandi!</b>\n\n"
+            f"🚕 Jami Yandex kabinetdagi haydovchilar: <b>{tot_drv} ta</b>\n"
+            f"🆕 Bazaga kiritilganlar: <b>{inserted_count} ta</b>\n"
+            f"🔄 Ma'lumoti yangilanganlar: <b>{updated_count} ta</b>\n"
+            f"🔒 Arizasi ko'rib chiqilayotganlar: <b>{len(pending_yandex_ids)} ta</b>\n\n"
+            f"💡 <i>Eslatma: 'Haydovchilar' bo'limida faqat botga kirib o'zini tasdiqlaganlar ko'rsatiladi.</i>"
         )
     except Exception as e:
         logger.error(f"Sinxronlashda xatolik: {e}")
@@ -2952,24 +2977,24 @@ async def admin_sync_all_drivers(message: Message) -> None:
             pass
 
 
-@admin_router.message(F.text.in_(["👥 Haydovchilar", "👥 Водители"]))
+@admin_router.message(F.text.in_(["👥 Haydovchilar", "👥 Водители", "👥 Haydovchilar (Botdan o'tganlar)", "👥 Водители (Бота)"]))
 async def admin_list_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    wait_msg = await message.answer("⏳ <i>Haydovchilar ro'yxati olinmoqda...</i>")
+    wait_msg = await message.answer("⏳ <i>Botdan ro'yxatdan o'tgan haydovchilar ro'yxati olinmoqda...</i>")
 
-    drivers = await db_get_all_registered_drivers()
+    drivers = await db_get_bot_registered_drivers()
     try:
         await wait_msg.delete()
     except Exception:
         pass
 
     if not drivers:
-        await message.answer("Hozircha ro'yxatdan o'tgan haydovchilar yo'q. '🔄 Yandex Sinxronlash' tugmasini bosing.")
+        await message.answer("ℹ️ Hozircha botdan ro'yxatdan o'tgan haqiqiy haydovchilar mavjud emas.")
         return
 
     total_count = len(drivers)
-    await message.answer(f"👥 <b>Barcha Haydovchilar Ro'yxati (Jami: {total_count} ta):</b>")
+    await message.answer(f"👥 <b>Botdan Ro'yxatdan O'tgan Haydovchilar (Jami: {total_count} ta):</b>")
 
     chunk_size = 20
     for chunk_start in range(0, total_count, chunk_size):
@@ -3093,7 +3118,7 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Xabar tarqatish bekor qilindi.", reply_markup=admin_main_kb(lang))
         return
     await state.clear()
-    users = await db_get_all_users()
+    users = await db_get_bot_registered_drivers()
     status_msg = await message.answer("⏳ <i>Xabar barcha haydovchilarga yuborilmoqda...</i>")
     sent = fail = 0
     for u in users:
@@ -3117,7 +3142,7 @@ async def admin_inactive_drivers(message: Message) -> None:
     if db_pool:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE (is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '')) AND (last_activity < $1 OR is_blocked=1) ORDER BY id DESC LIMIT 20",
+                "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE is_registered=1 AND telegram_id IS NOT NULL AND (last_activity < $1 OR is_blocked=1) ORDER BY id DESC LIMIT 20",
                 ten_days_ago
             )
             inactive = [dict(r) for r in rows]
@@ -3125,15 +3150,15 @@ async def admin_inactive_drivers(message: Message) -> None:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         inactive = [dict(r) for r in conn.execute(
-            "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE (is_registered=1 OR (yandex_driver_id IS NOT NULL AND yandex_driver_id != '')) AND (last_activity < ? OR is_blocked=1) ORDER BY id DESC LIMIT 20",
+            "SELECT position, full_name, phone, car_model, car_number, last_activity FROM users WHERE is_registered=1 AND telegram_id IS NOT NULL AND (last_activity < ? OR is_blocked=1) ORDER BY id DESC LIMIT 20",
             (ten_days_ago,)
         ).fetchall()]
         conn.close()
 
     if not inactive:
-        await message.answer("✅ Barcha haydovchilar faol!")
+        await message.answer("✅ Barcha bot haydovchilari faol!")
         return
-    text = f"🚫 <b>10+ kundan beri faol bo'lmagan ({len(inactive)} ta):</b>\n\n"
+    text = f"🚫 <b>10+ kundan beri faol bo'lmagan bot haydovchilari ({len(inactive)} ta):</b>\n\n"
     for drv in inactive:
         d_name = esc(drv.get("full_name", "Noma'lum"))
         d_phone = esc(drv.get("phone", ""))
@@ -3163,7 +3188,7 @@ async def daily_morning_reminder():
             now = datetime.now(TASHKENT_TZ)
             if now.hour == 8 and now.minute == 0 and now.day != last_sent_day:
                 last_sent_day = now.day
-                drivers = await db_get_all_registered_drivers()
+                drivers = await db_get_bot_registered_drivers()
                 text = (
                     "🕌 <b>Assalomu alaykum hurmatli haydovchilar!</b>\n\n"
                     f"🚕 <b>{BOT_NAME}</b> jamoasi eslatadi:\n\n"
@@ -3180,7 +3205,7 @@ async def daily_morning_reminder():
                             await asyncio.sleep(0.08)
                         except Exception:
                             pass
-                logger.info(f"Ertalabki eslatma {len(drivers)} ta haydovchiga yuborildi.")
+                logger.info(f"Ertalabki eslatma {len(drivers)} ta bot haydovchisiga yuborildi.")
         except Exception as e:
             logger.error(f"daily_morning_reminder xatosi: {e}")
         await asyncio.sleep(30)
@@ -3232,7 +3257,7 @@ async def yandex_auto_sync_scheduler():
                                 await conn.execute(
                                     """INSERT INTO users 
                                         (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
-                                    VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $8)
+                                    VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $8)
                                     ON CONFLICT (position) DO NOTHING""",
                                     full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now
                                 )
@@ -3265,7 +3290,7 @@ async def yandex_auto_sync_scheduler():
                                 conn.execute(
                                     """INSERT OR IGNORE INTO users 
                                         (full_name, phone, car_model, car_number, position, balance, yandex_driver_id, is_registered, created_at, updated_at)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
                                     (full_name, p_clean, car_model, car_num, new_pos, bal, y_id, now, now)
                                 )
                         conn.close()
@@ -3290,7 +3315,7 @@ async def monthly_report_scheduler():
                         await bot.send_document(
                             chat_id=adm,
                             document=file,
-                            caption=f"🗓 <b>{now.year}-yil {month_name} Oylik Hisoboti!</b>\n\nBarcha haydovchilar statistikasi va umumiy aylanma."
+                            caption=f"🗓 <b>{now.year}-yil {month_name} Oylik Hisoboti!</b>\n\nFaqat botdan ro'yxatdan o'tgan haydovchilar hisoboti."
                         )
                     except Exception:
                         pass
