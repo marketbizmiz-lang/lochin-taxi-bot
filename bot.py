@@ -1481,7 +1481,6 @@ TEXTS = {
         "menu_orders": "📊 Bugungi buyurtmalar",
         "menu_withdraw": "💸 Pul yechish (24/7)",
         "menu_profile": "👤 Profil",
-        "menu_top": "🏆 TOP Haydovchilar",
         "menu_group": "📢 Yangiliklar / Guruh",
         "menu_sos": "🆘 Yordam / SOS",
         "menu_admin": "🛠 Admin Panel",
@@ -1514,7 +1513,6 @@ TEXTS = {
         "menu_orders": "📊 Сегодняшние заказы",
         "menu_withdraw": "💸 Вывод средств (24/7)",
         "menu_profile": "👤 Профиль",
-        "menu_top": "🏆 ТОП Водителей",
         "menu_group": "📢 Новости / Группа",
         "menu_sos": "🆘 Помощь / SOS",
         "menu_admin": "🛠 Админ Панель",
@@ -1542,11 +1540,11 @@ def t(lang_code: str, key: str, **kwargs) -> str:
 
 
 def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
+    # "Top haydovchilar" tugmasi olib tashlandi
     buttons = [
         [KeyboardButton(text=t(lang, "menu_balance")), KeyboardButton(text=t(lang, "menu_withdraw"))],
         [KeyboardButton(text=t(lang, "menu_orders")), KeyboardButton(text=t(lang, "menu_profile"))],
-        [KeyboardButton(text=t(lang, "menu_top")), KeyboardButton(text=t(lang, "menu_group"))],
-        [KeyboardButton(text=t(lang, "menu_sos"))],
+        [KeyboardButton(text=t(lang, "menu_group")), KeyboardButton(text=t(lang, "menu_sos"))],
     ]
     if is_admin(uid):
         buttons.append([KeyboardButton(text=t(lang, "menu_admin"))])
@@ -1662,7 +1660,6 @@ class RegStates(StatesGroup):
 
 class WithdrawStates(StatesGroup):
     amount = State()
-    confirm = State()
 
 
 class SOSStates(StatesGroup):
@@ -1742,7 +1739,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     await db_upsert_start(uid, message.from_user.username or "")
 
-    # AGAR ADMIN BO'LSA - UNGA DARHOL ASOSIY MENYU OCHILADI (Ro'yxatdan o'tishni so'ramaydi)
+    # AGAR ADMIN BO'LSA - UNGA DARHOL ASOSIY MENYU OCHILADI
     if is_admin(uid):
         lang = await get_lang(uid)
         await message.answer(
@@ -2078,7 +2075,6 @@ async def orders_handler(message: Message) -> None:
     wait_msg = await message.answer("⏳ <i>Yandex Pro dan shaxsiy buyurtmalaringiz olinmoqda...</i>")
 
     y_id = user.get("yandex_driver_id")
-    phone = user.get("phone")
 
     stats = await yandex_api.get_today_orders_stats(yandex_driver_id=y_id) if y_id else {
         "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0, "in_progress_orders": 0,
@@ -2166,6 +2162,12 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
 async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
+
+    if message.text in CANCEL_TEXTS:
+        await state.clear()
+        await message.answer(t(lang, "action_cancelled"), reply_markup=user_main_kb(lang, uid))
+        return
+
     raw = (message.text or "").replace(" ", "").replace("so'm", "").replace("som", "").replace("сум", "").strip()
     if not raw.isdigit():
         await message.answer("⚠️ Iltimos, summani faqat musbat butun raqamlarda kiriting:")
@@ -2186,72 +2188,34 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     comm = int(amount * (COMMISSION_PERCENT / 100.0))
     net = amount - comm
     full_card_val = user.get("card_number") or ""
-    masked_card_val = mask_card(full_card_val)
     rem_deposit = cur_bal - amount
 
-    await state.update_data(amount=amount, commission=comm, net_amount=net, card=full_card_val, rem_deposit=rem_deposit)
-    await state.set_state(WithdrawStates.confirm)
-
-    confirm_txt = (
-        f"💳 <b>Pul yechish arizasini tasdiqlaysizmi?</b>\n\n"
-        f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
-        f"💵 Kartaga to'lanadi: <b>{fmt_sum(net)} so'm</b>\n"
-        f"🔒 Depozitda qoladi: <b>{fmt_sum(rem_deposit)} so'm</b>\n"
-        f"💳 Karta: <code>{masked_card_val}</code>"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Ha, so'rov yuborish", callback_data="wd_go:yes"),
-        InlineKeyboardButton(text="❌ Bekor qilish", callback_data="wd_go:no"),
-    ]])
-    await message.answer(confirm_txt, reply_markup=kb)
-
-
-@router.callback_query(F.data.startswith("wd_go:"), WithdrawStates.confirm)
-async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) -> None:
-    uid = callback.from_user.id
-    action = callback.data.split(":")[1]
-
-    if action == "no":
-        await state.clear()
-        await callback.message.edit_text("❌ Pul yechish bekor qilindi.")
-        await callback.answer()
-        return
-
-    data = await state.get_data()
-    amount = data["amount"]
-    commission = data["commission"]
-    net_amount = data["net_amount"]
-    full_card = data["card"]
-    rem_deposit = data.get("rem_deposit", 0)
+    # State'ni tozalaymiz
     await state.clear()
 
-    user = await db_get_user(uid)
-    if not user:
-        await callback.message.edit_text("❌ Foydalanuvchi topilmadi.")
-        await callback.answer()
-        return
-
+    # Bazada tranzaksiya yaratamiz
     try:
         w_id = await db_create_withdrawal(
-            user_id=user["id"], telegram_id=uid, amount=amount, commission=commission,
-            net_amount=net_amount, card_number=full_card, status="pending",
+            user_id=user["id"], telegram_id=uid, amount=amount, commission=comm,
+            net_amount=net, card_number=full_card_val, status="pending",
             payout_method="manual", ext_tx_id="",
         )
     except ValueError as val_err:
-        await callback.message.edit_text(f"❌ Xatolik: {val_err}")
-        await callback.answer("Amaliyot rad etildi!", show_alert=True)
+        await message.answer(f"❌ Xatolik: {val_err}", reply_markup=user_main_kb(lang, uid))
         return
 
-    masked_c = mask_card(full_card)
-    await callback.message.edit_text(
+    # 1. HAYDOVCHIGA ANIQ VA ROVON XABAR VA DASTUR BOSH MENYUGA O'TADI
+    masked_c = mask_card(full_card_val)
+    await message.answer(
         f"⏳ <b>Arizangiz qabul qilindi! (Ariza #{w_id})</b>\n\n"
         f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
-        f"💵 Kartaga tushadi: <b>{fmt_sum(net_amount)} so'm</b>\n"
+        f"💵 Kartaga tushadi: <b>{fmt_sum(net)} so'm</b>\n"
         f"💳 Karta: <code>{masked_c}</code>\n\n"
-        f"👨💻 <i>Hozirda ariza administrator tekshiruvida. Admin tasdiqlashi bilan pul kartangizga o'tkaziladi.</i>"
+        f"👨💻 <i>Hozirda ariza administrator tekshiruvida. Admin tasdiqlashi bilan pul kartangizga o'tkaziladi.</i>",
+        reply_markup=user_main_kb(lang, uid)
     )
-    await callback.answer("Arizangiz adminga yuborildi!")
 
+    # 2. ADMINGA XABARDOR QILISH VA TO'LOV TUGMALARI
     y_status_txt = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
     u_pos = user.get("position", "N/A")
     u_name = esc(user.get("full_name", ""))
@@ -2265,23 +2229,23 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         f"👤 <b>Haydovchi:</b> {u_name}\n"
         f"📱 <b>Telefon:</b> <code>{u_phone}</code>\n"
         f"🚗 <b>Avtomobil:</b> {u_model} ({u_num})\n"
-        f"💳 <b>Karta:</b> <code>{full_card}</code> <i>(Nusxa olish uchun bosing)</i>\n"
+        f"💳 <b>Karta:</b> <code>{full_card_val}</code> <i>(Nusxa olish uchun bosing)</i>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"💰 <b>Yechilayotgan summa:</b> {fmt_sum(amount)} so'm\n"
-        f"💵 <b>Kartaga to'lanishi kerak:</b> <b>{fmt_sum(net_amount)} so'm</b>\n"
+        f"💵 <b>Kartaga to'lanishi kerak:</b> <b>{fmt_sum(net)} so'm</b>\n"
         f"🔒 <b>Depozitda qoladigan:</b> {fmt_sum(rem_deposit)} so'm\n"
         f"🚖 <b>Yandex Pro:</b> {y_status_txt}"
     )
 
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💳 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")
+            InlineKeyboardButton(text="🏦 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")
         ],
         [
-            InlineKeyboardButton(text="✅ Qo'lda to'landi (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}"),
-            InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}")
+            InlineKeyboardButton(text="💳 Click / Payme orqali to'landi (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}")
         ],
         [
+            InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}"),
             InlineKeyboardButton(text="💬 Haydovchi bilan chat", url=f"tg://user?id={uid}")
         ]
     ])
@@ -2330,7 +2294,7 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
         await callback.message.reply(
             f"❌ <b>Kapitalbank to'lovida xatolik yuz berdi!</b>\n\n"
             f"🔍 <b>Sabab:</b> <code>{esc(bank_msg)}</code>\n\n"
-            f"<i>Pul kartaga o'tmadi va Yandexdan yechilmadi. Qayta urinib ko'rishingiz yoki 'Qo'lda to'landi' tugmasini bosishingiz mumkin.</i>"
+            f"<i>Pul kartaga o'tmadi va Yandexdan yechilmadi. Qayta urinib ko'rishingiz yoki 'Click / Payme orqali to'landi' tugmasini bosishingiz mumkin.</i>"
         )
         return
 
@@ -2356,9 +2320,10 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
     try:
         await bot.send_message(
             user["telegram_id"],
-            f"✅ <b>Tabriklaymiz! Pul yechish arizangiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
+            f"✅ <b>So'rovingiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
             f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> Kapitalbank orqali kartangizga muvaffaqiyatli o'tkazildi.\n"
             f"💳 Karta: <code>{mask_card(card_num)}</code>\n\n"
+            f"⏳ <i>Kuting, pulingiz 5 daqiqada kartangizga o'tkazib beriladi.</i>\n"
             f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>"
         )
     except Exception:
@@ -2386,14 +2351,14 @@ async def admin_approve_payout(callback: CallbackQuery):
         await yandex_api.create_transaction(
             user["yandex_driver_id"],
             int(wd["amount"]),
-            f"Lochin Taxi Bot to'lovi #{w_id} ({mask_card(wd.get('card_number',''))})"
+            f"Lochin Taxi Click/Payme #{w_id} ({mask_card(wd.get('card_number',''))})"
         )
 
     await db_update_withdrawal_status(w_id, "completed")
 
     try:
         await callback.message.edit_text(
-            f"{callback.message.text}\n\n✅ <b>TO'LANDI VA YANDEX PRODAN YECHILDI!</b>\n👨💻 Admin: {esc(callback.from_user.full_name)}"
+            f"{callback.message.text}\n\n✅ <b>TO'LANDI (Click/Payme) VA YANDEX PRODAN YECHILDI!</b>\n👨💻 Admin: {esc(callback.from_user.full_name)}"
         )
     except Exception:
         pass
@@ -2402,9 +2367,10 @@ async def admin_approve_payout(callback: CallbackQuery):
     try:
         await bot.send_message(
             user["telegram_id"],
-            f"✅ <b>Pul yechish arizangiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
+            f"✅ <b>So'rovingiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
             f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> kartangizga muvaffaqiyatli o'tkazildi.\n"
             f"💳 Karta: <code>{mask_card(wd.get('card_number',''))}</code>\n\n"
+            f"⏳ <i>Kuting, pulingiz 5 daqiqada kartangizga o'tkazib beriladi.</i>\n"
             f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>"
         )
     except Exception:
@@ -2438,16 +2404,16 @@ async def admin_reject_payout(callback: CallbackQuery):
         try:
             await bot.send_message(
                 user["telegram_id"],
-                f"❌ <b>Pul yechish arizangiz rad etildi. (Ariza #{w_id})</b>\n\n"
+                f"❌ <b>Pul yechish arizangiz rad etildi! (Ariza #{w_id})</b>\n\n"
                 f"💰 {fmt_sum(wd['amount'])} so'm balansingizga qaytarildi.\n"
-                f"Batafsil ma'lumot uchun menejer bilan bog'laning."
+                f"Batafsil ma'lumot olish uchun menejer bilan bog'laning."
             )
         except Exception:
             pass
 
 
 # ============================================================
-# 16. PROFIL, TOP, SOS
+# 16. PROFIL, SOS
 # ============================================================
 
 @router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
@@ -2502,27 +2468,6 @@ async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) 
 async def change_lang_menu_cb(callback: CallbackQuery) -> None:
     await callback.message.edit_text("🌐 Tilni tanlang / Выберите язык:", reply_markup=language_inline_kb())
     await callback.answer()
-
-
-@router.message(F.text.in_(["🏆 TOP Haydovchilar", "🏆 ТОП Водителей"]))
-async def top_drivers_handler(message: Message) -> None:
-    uid = message.from_user.id
-    lang = await get_lang(uid)
-    drivers = await db_get_all_registered_drivers()
-    top = sorted(drivers, key=lambda x: int(x.get("total_orders", 0) or 0), reverse=True)[:10]
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    text = f"🏆 <b>{BOT_NAME} — Haftaning Eng Faol Haydovchilari:</b>\n\n"
-    if top and any(int(d.get("total_orders", 0) or 0) > 0 for d in top):
-        for i, d in enumerate(top):
-            medal_icon = medals[i] if i < len(medals) else str(i + 1)
-            d_name = esc(d.get("full_name", ""))
-            d_pos = d.get("position", "N/A")
-            d_orders = d.get("total_orders", 0)
-            text += f"{medal_icon}. <b>{d_name}</b> (<code>{d_pos}</code>) — <b>{d_orders} ta zakaz</b>\n"
-    else:
-        text += "<i>Hozircha haftalik reyting shakllanmoqda...</i>\n"
-    text += "\n🔥 <i>Ko'proq buyurtma bajaring va haftalik maxsus bonuslarga ega bo'ling!</i>"
-    await message.answer(text, reply_markup=user_main_kb(lang, uid))
 
 
 @router.message(F.text.in_(["📢 Yangiliklar / Guruh", "📢 Новости / Группа"]))
@@ -2733,11 +2678,13 @@ async def admin_pending_withdrawals_list(message: Message):
 
         adm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="💳 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")
+                InlineKeyboardButton(text="🏦 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")
             ],
             [
-                InlineKeyboardButton(text="✅ Qo'lda to'landi (Yopish)", callback_data=f"adm_pay:{w_id}"),
-                InlineKeyboardButton(text="❌ Rad etish (Qaytarish)", callback_data=f"adm_rej:{w_id}")
+                InlineKeyboardButton(text="💳 Click / Payme orqali to'landi (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}")
             ]
         ])
         await message.answer(alert_text, reply_markup=adm_kb)
