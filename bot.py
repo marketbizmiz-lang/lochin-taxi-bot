@@ -572,10 +572,6 @@ async def db_get_driver_today_withdrawn(user_id: int) -> int:
 
 
 async def db_get_all_bot_drivers() -> List[dict]:
-    """
-    BOTDAN RO'YXATDAN O'TGAN YOKI BOTGA ULANGAN BARCHA HAYDOVCHILAR (100 ga yaqin).
-    Quruq Yandex importlari bu yerda ko'rinmaydi, aynan bot a'zolari ko'rinadi.
-    """
     if db_pool:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch(
@@ -593,7 +589,6 @@ async def db_get_all_bot_drivers() -> List[dict]:
 
 
 async def db_get_bot_users_for_broadcast() -> List[dict]:
-    """Faqat botga start bosgan / ulanganlar — telegram_id borlar"""
     if db_pool:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 ORDER BY id ASC")
@@ -689,7 +684,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# YANDEX FLEET API (CHEKLOVSIZ CURSOR ENGINE)
+# YANDEX FLEET API
 # ============================================================
 
 class YandexFleetAPI:
@@ -779,7 +774,6 @@ class YandexFleetAPI:
         cur_st = str(raw_driver.get("current_status", {}).get("status", "")).lower()
         is_on_order = bool("order" in st_raw or "order" in cur_st or raw_driver.get("order") or "busy" in cur_st)
 
-        # Real-time Status
         if is_on_order:
             status_text = "🔴 Band (Zakazda)"
         elif work_status == "working" or "online" in cur_st or "free" in cur_st or "ready" in cur_st:
@@ -801,10 +795,6 @@ class YandexFleetAPI:
         }
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
-        """
-        1000+ haydovchini cursor orqali to'liq va cheklovsiz olish.
-        DIQQAT: len(batch) < 1000 sharti olib tashlandi, chunki Yandex maksimal 500 ta beradi!
-        """
         if not self._is_configured():
             return [], "Yandex API sozlamalari to'liq emas!"
         now = datetime.now()
@@ -819,7 +809,7 @@ class YandexFleetAPI:
 
         try:
             session = await self._get_session()
-            for _ in range(50):  # 50 * 500 = 25 000 tagacha haydovchini qo'llab-quvvatlaydi
+            for _ in range(50):
                 payload: Dict[str, Any] = {
                     "query": {
                         "park": {"id": self.park_id}
@@ -856,10 +846,8 @@ class YandexFleetAPI:
                     if added_in_page == 0:
                         break
 
-                    # Yandex cursor qidirish (root yoki pagination ichida)
                     new_cursor = data.get("cursor") or data.get("next_cursor") or data.get("pagination", {}).get("next_cursor")
                     if not new_cursor or new_cursor == cursor:
-                        # Cursor tugadi, demak barcha haydovchilar olindi
                         break
                     cursor = new_cursor
                     await asyncio.sleep(0.1)
@@ -1470,8 +1458,10 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     user = await db_get_user(uid)
     if user and user.get("is_registered") == 1:
         lang = user.get("language", "uz")
+        drv_name = esc(user.get("full_name") or "Haydovchi")
+        pos_id = user.get("position") or "N/A"
         await message.answer(
-            t(lang, "already_reg", position=user.get("position") or "N/A", name=esc(user.get("full_name") or "Haydovchi")),
+            t(lang, "already_reg", position=pos_id, name=drv_name),
             reply_markup=user_main_kb(lang, uid)
         )
         return
@@ -1493,8 +1483,10 @@ async def lang_callback(callback: CallbackQuery) -> None:
         return
     user = await db_get_user(uid)
     if user and user.get("is_registered") == 1:
+        drv_name = esc(user.get("full_name") or "Haydovchi")
+        pos_id = user.get("position") or "N/A"
         await callback.message.answer(
-            t(lang, "already_reg", position=user.get("position") or "N/A", name=esc(user.get("full_name") or "Haydovchi")),
+            t(lang, "already_reg", position=pos_id, name=drv_name),
             reply_markup=user_main_kb(lang, uid)
         )
     else:
@@ -1513,8 +1505,10 @@ async def reg_start_flow(message: Message, state: FSMContext) -> None:
     user = await db_get_user(uid)
     lang = user.get("language", "uz") if user else "uz"
     if user and user.get("is_registered") == 1:
+        drv_name = esc(user.get("full_name") or "Haydovchi")
+        pos_id = user.get("position") or "N/A"
         await message.answer(
-            t(lang, "already_reg", position=user.get("position") or "N/A", name=esc(user.get("full_name") or "Haydovchi")),
+            t(lang, "already_reg", position=pos_id, name=drv_name),
             reply_markup=user_main_kb(lang, uid)
         )
         return
@@ -1555,9 +1549,13 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
             yandex_driver_id=y_driver.get("id")
         )
         await state.set_state(RegStates.card)
+        drv_nm = esc(y_driver.get("full_name", ""))
+        car_md = esc(y_driver.get("car_model", ""))
+        car_nb = esc(y_driver.get("car_number", ""))
+        card_prompt = t(lang, "reg_card")
         await message.answer(
-            f"✅ <b>Yandex da topildingiz!</b>\n👤 {esc(y_driver.get('full_name',''))}\n"
-            f"🚗 {esc(y_driver.get('car_model',''))} ({esc(y_driver.get('car_number',''))})\n\n{t(lang,'reg_card')}",
+            f"✅ <b>Yandex da topildingiz!</b>\n👤 {drv_nm}\n"
+            f"🚗 {car_md} ({car_nb})\n\n{card_prompt}",
             reply_markup=cancel_kb(lang)
         )
     else:
@@ -1573,7 +1571,8 @@ async def reg_step_name(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(full_name=name)
     await state.set_state(RegStates.card)
-    await message.answer(t(await get_lang(message.from_user.id), "reg_card"), reply_markup=cancel_kb(await get_lang(message.from_user.id)))
+    lang = await get_lang(message.from_user.id)
+    await message.answer(t(lang, "reg_card"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.card)
@@ -1588,14 +1587,16 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
         await finish_registration_process(message, state, data)
     else:
         await state.set_state(RegStates.car_model)
-        await message.answer(t(await get_lang(message.from_user.id), "reg_car_model"), reply_markup=cancel_kb(await get_lang(message.from_user.id)))
+        lang = await get_lang(message.from_user.id)
+        await message.answer(t(lang, "reg_car_model"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.car_model)
 async def reg_step_car_model(message: Message, state: FSMContext) -> None:
     await state.update_data(car_model=(message.text or "").strip())
     await state.set_state(RegStates.car_number)
-    await message.answer(t(await get_lang(message.from_user.id), "reg_car_number"), reply_markup=cancel_kb(await get_lang(message.from_user.id)))
+    lang = await get_lang(message.from_user.id)
+    await message.answer(t(lang, "reg_car_number"), reply_markup=cancel_kb(lang))
 
 
 @router.message(RegStates.car_number)
@@ -1635,12 +1636,16 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
             pass
 
     yandex_txt = "Ulangan ✅" if y_id else "Ulanmagan ❌"
+    fn_esc = esc(full_name)
+    ph_esc = esc(phone)
+    cm_esc = esc(car_model)
+    cn_esc = esc(car_number)
     admin_alert = (
         f"🆕 <b>YANGI HAYDOVCHI!</b>\n\n"
         f"🆔 POSITION: <code>{position}</code>\n"
-        f"👤 <b>{esc(full_name)}</b>\n"
-        f"📱 <code>{esc(phone)}</code>\n"
-        f"🚗 {esc(car_model)} ({esc(car_number)})\n"
+        f"👤 <b>{fn_esc}</b>\n"
+        f"📱 <code>{ph_esc}</code>\n"
+        f"🚗 {cm_esc} ({cn_esc})\n"
         f"💳 <code>{mask_card(card)}</code>\n"
         f"💰 Balans: <b>{fmt_sum(init_bal)} so'm</b>\n"
         f"🚖 Yandex: {yandex_txt}"
@@ -1680,14 +1685,22 @@ async def balance_handler(message: Message) -> None:
         pass
     today_withdrawn = await db_get_driver_today_withdrawn(user["id"])
     avail = max(0, cur_bal - MIN_DEPOSIT)
+    fn = esc(user.get("full_name", ""))
+    pos = user.get("position", "N/A")
+    ph = esc(user.get("phone", ""))
+    cm = esc(user.get("car_model", ""))
+    cn = esc(user.get("car_number", ""))
+    mc = mask_card(user.get("card_number", ""))
+    time_str = datetime.now(TASHKENT_TZ).strftime("%H:%M:%S")
+
     text = (
         f"💰 <b>{BOT_NAME} — Balans (Real vaqt):</b>\n"
-        f"🕒 {datetime.now(TASHKENT_TZ).strftime('%H:%M:%S')}\n\n"
-        f"👤 {esc(user.get('full_name',''))}\n"
-        f"🆔 <code>{user.get('position','N/A')}</code>\n"
-        f"📱 <code>{esc(user.get('phone',''))}</code>\n"
-        f"🚗 {esc(user.get('car_model',''))} ({esc(user.get('car_number',''))})\n"
-        f"💳 <code>{mask_card(user.get('card_number',''))}</code>\n"
+        f"🕒 {time_str}\n\n"
+        f"👤 {fn}\n"
+        f"🆔 <code>{pos}</code>\n"
+        f"📱 <code>{ph}</code>\n"
+        f"🚗 {cm} ({cn})\n"
+        f"💳 <code>{mc}</code>\n"
         f"➖➖➖\n"
         f"💳 Balans: <b>{fmt_sum(cur_bal)} so'm</b>\n"
         f"🔒 Depozit: {fmt_sum(MIN_DEPOSIT)}\n"
@@ -1716,16 +1729,24 @@ async def orders_handler(message: Message) -> None:
     except Exception:
         pass
     now_tashkent = datetime.now(TASHKENT_TZ)
-    act = f"  └ 🚖 Jarayonda: <b>{stats.get('in_progress_orders',0)} ta</b>\n" if stats.get('in_progress_orders', 0) > 0 else ""
+    in_prog = stats.get("in_progress_orders", 0)
+    act = f"  └ 🚖 Jarayonda: <b>{in_prog} ta</b>\n" if in_prog > 0 else ""
+    date_str = now_tashkent.strftime("%d.%m.%Y | %H:%M")
+    tot_ord = stats.get("total_orders", 0)
+    cmp_ord = stats.get("completed_orders", 0)
+    tot_earn = fmt_sum(stats.get("total_earnings", 0))
+    crd_earn = fmt_sum(stats.get("card_earnings", 0))
+    csh_earn = fmt_sum(stats.get("cash_earnings", 0))
+
     text = (
         f"📊 <b>Bugungi buyurtmalar:</b>\n"
-        f"📅 {now_tashkent.strftime('%d.%m.%Y | %H:%M')}\n\n"
-        f"🚕 Jami: <b>{stats.get('total_orders',0)} ta</b>\n"
-        f"  └ ✅ Tugallangan: <b>{stats.get('completed_orders',0)} ta</b>\n"
+        f"📅 {date_str}\n\n"
+        f"🚕 Jami: <b>{tot_ord} ta</b>\n"
+        f"  └ ✅ Tugallangan: <b>{cmp_ord} ta</b>\n"
         f"{act}"
-        f"💰 Daromad: <b>{fmt_sum(stats.get('total_earnings',0))} so'm</b>\n"
-        f"  └ 💳 Karta: <b>{fmt_sum(stats.get('card_earnings',0))}</b>\n"
-        f"  └ 💵 Naqd: <b>{fmt_sum(stats.get('cash_earnings',0))}</b>"
+        f"💰 Daromad: <b>{tot_earn} so'm</b>\n"
+        f"  └ 💳 Karta: <b>{crd_earn}</b>\n"
+        f"  └ 💵 Naqd: <b>{csh_earn}</b>"
     )
     await message.answer(text, reply_markup=user_main_kb(lang, uid))
 
@@ -1754,7 +1775,8 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
         cur_bal = int(user.get("balance", 0) or 0)
     avail = max(0, cur_bal - MIN_DEPOSIT)
     if avail < MIN_WITHDRAWAL:
-        await message.answer(f"{t(lang,'withdraw_no_money')}\n\nJoriy: <b>{fmt_sum(cur_bal)}</b>\nYechish mumkin: <b>{fmt_sum(avail)}</b>", reply_markup=user_main_kb(lang, uid))
+        err_msg = t(lang, "withdraw_no_money")
+        await message.answer(f"{err_msg}\n\nJoriy: <b>{fmt_sum(cur_bal)}</b>\nYechish mumkin: <b>{fmt_sum(avail)}</b>", reply_markup=user_main_kb(lang, uid))
         return
     await state.set_state(WithdrawStates.amount)
     await message.answer(t(lang, "withdraw_ask", avail=fmt_sum(avail)), reply_markup=cancel_kb(lang))
@@ -1805,12 +1827,18 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         reply_markup=user_main_kb(lang, uid)
     )
 
+    pos = user.get("position", "N/A")
+    fn = esc(user.get("full_name", ""))
+    ph = esc(user.get("phone", ""))
+    cm = esc(user.get("car_model", ""))
+    cn = esc(user.get("car_number", ""))
+
     admin_alert = (
         f"💸 <b>YANGI ARIZA! (#{w_id})</b>\n\n"
-        f"🆔 <code>{user.get('position','N/A')}</code>\n"
-        f"👤 {esc(user.get('full_name',''))}\n"
-        f"📱 <code>{esc(user.get('phone',''))}</code>\n"
-        f"🚗 {esc(user.get('car_model',''))} ({esc(user.get('car_number',''))})\n"
+        f"🆔 <code>{pos}</code>\n"
+        f"👤 {fn}\n"
+        f"📱 <code>{ph}</code>\n"
+        f"🚗 {cm} ({cn})\n"
         f"💳 <code>{full_card_val}</code>\n"
         f"➖➖➖\n"
         f"💰 Summa: {fmt_sum(amount)}\n"
@@ -1851,7 +1879,8 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
         doc_id=w_id
     )
     if not success:
-        await callback.message.reply(f"❌ <b>Bank xatoligi!</b>\n<code>{esc(bank_msg)}</code>\n\nClick/Payme tugmasidan foydalaning.")
+        b_msg = esc(bank_msg)
+        await callback.message.reply(f"❌ <b>Bank xatoligi!</b>\n<code>{b_msg}</code>\n\nClick/Payme tugmasidan foydalaning.")
         return
     if user.get("yandex_driver_id"):
         await yandex_api.create_transaction(
@@ -1861,13 +1890,16 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
         )
     await db_update_withdrawal_status(w_id, "completed", ext_tx_id=tx_id)
     try:
-        await callback.message.edit_text(f"{callback.message.text}\n\n✅ <b>KAPITALBANK ORQALI TO'LANDI!</b>\n🏦 {tx_id}\n👨💻 {esc(callback.from_user.full_name)}")
+        adm_name = esc(callback.from_user.full_name)
+        await callback.message.edit_text(f"{callback.message.text}\n\n✅ <b>KAPITALBANK ORQALI TO'LANDI!</b>\n🏦 {tx_id}\n👨💻 {adm_name}")
     except Exception:
         pass
     try:
+        mc = mask_card(wd.get("card_number", ""))
+        net_str = fmt_sum(wd["net_amount"])
         await bot.send_message(
             user["telegram_id"],
-            f"✅ <b>Ariza #{w_id} tasdiqlandi!</b>\n\n💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> kartangizga o'tkazildi.\n💳 <code>{mask_card(wd.get('card_number',''))}</code>",
+            f"✅ <b>Ariza #{w_id} tasdiqlandi!</b>\n\n💵 <b>{net_str} so'm</b> kartangizga o'tkazildi.\n💳 <code>{mc}</code>",
             reply_markup=user_main_kb("uz", user["telegram_id"])
         )
     except Exception:
@@ -1896,14 +1928,16 @@ async def admin_approve_payout(callback: CallbackQuery):
         )
     await db_update_withdrawal_status(w_id, "completed")
     try:
-        await callback.message.edit_text(f"{callback.message.text}\n\n✅ <b>TO'LANDI (Click/Payme) VA YANDEXDAN YECHILDI!</b>\n👨💻 {esc(callback.from_user.full_name)}")
+        adm_name = esc(callback.from_user.full_name)
+        await callback.message.edit_text(f"{callback.message.text}\n\n✅ <b>TO'LANDI (Click/Payme) VA YANDEXDAN YECHILDI!</b>\n👨💻 {adm_name}")
     except Exception:
         pass
     await callback.answer("Tasdiqlandi!")
     try:
+        net_str = fmt_sum(wd["net_amount"])
         await bot.send_message(
             user["telegram_id"],
-            f"✅ <b>Ariza #{w_id} tasdiqlandi!</b>\n\n💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> kartangizga o'tkazildi.",
+            f"✅ <b>Ariza #{w_id} tasdiqlandi!</b>\n\n💵 <b>{net_str} so'm</b> kartangizga o'tkazildi.",
             reply_markup=user_main_kb("uz", user["telegram_id"])
         )
     except Exception:
@@ -1923,15 +1957,17 @@ async def admin_reject_payout(callback: CallbackQuery):
     await db_refund_withdrawal(w_id)
     user = await db_get_user_by_id(wd["user_id"])
     try:
-        await callback.message.edit_text(f"{callback.message.text}\n\n❌ <b>RAD ETILDI VA QAYTARILDI.</b>\n👨💻 {esc(callback.from_user.full_name)}")
+        adm_name = esc(callback.from_user.full_name)
+        await callback.message.edit_text(f"{callback.message.text}\n\n❌ <b>RAD ETILDI VA QAYTARILDI.</b>\n👨💻 {adm_name}")
     except Exception:
         pass
     await callback.answer("Rad etildi!")
     if user:
         try:
+            amt_str = fmt_sum(wd["amount"])
             await bot.send_message(
                 user["telegram_id"],
-                f"❌ <b>Ariza #{w_id} rad etildi!</b>\n\n💰 {fmt_sum(wd['amount'])} so'm balansga qaytarildi.",
+                f"❌ <b>Ariza #{w_id} rad etildi!</b>\n\n💰 {amt_str} so'm balansga qaytarildi.",
                 reply_markup=user_main_kb("uz", user["telegram_id"])
             )
         except Exception:
@@ -1951,13 +1987,20 @@ async def profile_handler(message: Message) -> None:
         return
     lang = user.get("language", "uz")
     y_val = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
+    pos = user.get("position", "N/A")
+    fn = esc(user.get("full_name", ""))
+    ph = esc(user.get("phone", ""))
+    cm = esc(user.get("car_model", ""))
+    cn = esc(user.get("car_number", ""))
+    mc = mask_card(user.get("card_number", ""))
+
     text = (
         f"👤 <b>Profil:</b>\n\n"
-        f"🆔 <code>{user.get('position','N/A')}</code>\n"
-        f"👤 <b>{esc(user.get('full_name',''))}</b>\n"
-        f"📱 <b>{esc(user.get('phone',''))}</b>\n"
-        f"🚗 <b>{esc(user.get('car_model',''))} ({esc(user.get('car_number',''))})</b>\n"
-        f"💳 <code>{mask_card(user.get('card_number',''))}</code>\n"
+        f"🆔 <code>{pos}</code>\n"
+        f"👤 <b>{fn}</b>\n"
+        f"📱 <b>{ph}</b>\n"
+        f"🚗 <b>{cm} ({cn})</b>\n"
+        f"💳 <code>{mc}</code>\n"
         f"🚕 Yandex: <b>{y_val}</b>"
     )
     inline_rows = [[InlineKeyboardButton(text="🌐 Tilni o'zgartirish", callback_data="change_lang_menu")]]
@@ -2017,11 +2060,17 @@ async def sos_receive_location_geo(message: Message, state: FSMContext) -> None:
     user = await db_get_user(uid) or {}
     lat, lon = message.location.latitude, message.location.longitude
     maps_url = f"https://maps.google.com/?q={lat},{lon}"
+    fn = esc(user.get("full_name") or "Noma'lum")
+    pos = user.get("position") or "N/A"
+    ph = esc(user.get("phone", ""))
+    cm = esc(user.get("car_model", ""))
+    cn = esc(user.get("car_number", ""))
+
     alert = (
         f"🚨 <b>SOS / LOKATSIYA!</b>\n\n"
-        f"👤 {esc(user.get('full_name','Noma\'lum'))} (<code>{user.get('position','N/A')}</code>)\n"
-        f"📱 <code>{esc(user.get('phone',''))}</code>\n"
-        f"🚗 {esc(user.get('car_model',''))} ({esc(user.get('car_number',''))})\n\n"
+        f"👤 {fn} (<code>{pos}</code>)\n"
+        f"📱 <code>{ph}</code>\n"
+        f"🚗 {cm} ({cn})\n\n"
         f"📍 <a href='{maps_url}'>Xaritada ochish</a>"
     )
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Chat", url=f"tg://user?id={uid}")]])
@@ -2044,11 +2093,16 @@ async def sos_receive_location_text(message: Message, state: FSMContext) -> None
         return
     await state.clear()
     user = await db_get_user(uid) or {}
+    fn = esc(user.get("full_name") or "Noma'lum")
+    pos = user.get("position") or "N/A"
+    ph = esc(user.get("phone", ""))
+    msg_addr = esc(message.text.strip())
+
     alert = (
         f"🚨 <b>SOS / MANZIL:</b>\n\n"
-        f"👤 {esc(user.get('full_name','Noma\'lum'))} (<code>{user.get('position','N/A')}</code>)\n"
-        f"📱 <code>{esc(user.get('phone',''))}</code>\n\n"
-        f"📍 {esc(message.text.strip())}"
+        f"👤 {fn} (<code>{pos}</code>)\n"
+        f"📱 <code>{ph}</code>\n\n"
+        f"📍 {msg_addr}"
     )
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Chat", url=f"tg://user?id={uid}")]])
     for adm in ADMIN_IDS:
@@ -2081,11 +2135,16 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     user = await db_get_user(uid) or {}
+    fn = esc(user.get("full_name") or "Noma'lum")
+    pos = user.get("position") or "N/A"
+    ph = esc(user.get("phone", ""))
+    txt_msg = esc(message.text or "")
+
     alert = (
         f"📩 <b>MUROJAAT:</b>\n\n"
-        f"👤 {esc(user.get('full_name','Noma\'lum'))} (<code>{user.get('position','N/A')}</code>)\n"
-        f"📱 <code>{esc(user.get('phone',''))}</code>\n\n"
-        f"✍ {esc(message.text or '')}"
+        f"👤 {fn} (<code>{pos}</code>)\n"
+        f"📱 <code>{ph}</code>\n\n"
+        f"✍ {txt_msg}"
     )
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Javob", url=f"tg://user?id={uid}")]])
     for adm in ADMIN_IDS:
@@ -2120,7 +2179,8 @@ async def cmd_clear_pending(message: Message):
             await message.answer(f"❌ '{args[1]}' topilmadi.")
             return
         count = await db_force_complete_pending(user_id=driver["id"])
-        await message.answer(f"✅ {esc(driver.get('full_name'))} ning {count} ta arizasi yopildi!")
+        d_name = esc(driver.get("full_name"))
+        await message.answer(f"✅ {d_name} ning {count} ta arizasi yopildi!")
     else:
         count = await db_force_complete_pending()
         await message.answer(f"✅ Barcha {count} ta ariza yopildi!")
@@ -2137,13 +2197,20 @@ async def admin_pending_withdrawals_list(message: Message):
     await message.answer(f"⏳ <b>Kutilayotgan arizalar (Jami: {len(pending_list)} ta):</b>")
     for wd in pending_list:
         w_id = wd["id"]
+        pos = wd.get("position", "N/A")
+        fn = esc(wd.get("full_name", "Haydovchi"))
+        ph = esc(wd.get("phone", ""))
+        cn = wd.get("card_number", "")
+        req_sum = fmt_sum(wd.get("amount", 0))
+        net_sum = fmt_sum(wd.get("net_amount", 0))
+
         alert_text = (
             f"💸 <b>Ariza #{w_id}</b>\n"
-            f"🆔 <code>{wd.get('position','N/A')}</code>\n"
-            f"👤 {esc(wd.get('full_name','Haydovchi'))}\n"
-            f"📱 <code>{esc(wd.get('phone',''))}</code>\n"
-            f"💳 <code>{wd.get('card_number','')}</code>\n"
-            f"💰 {fmt_sum(wd.get('amount',0))} | To'lanadi: <b>{fmt_sum(wd.get('net_amount',0))}</b>"
+            f"🆔 <code>{pos}</code>\n"
+            f"👤 {fn}\n"
+            f"📱 <code>{ph}</code>\n"
+            f"💳 <code>{cn}</code>\n"
+            f"💰 {req_sum} | To'lanadi: <b>{net_sum}</b>"
         )
         adm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🏦 Kapitalbank", callback_data=f"adm_kapital:{w_id}")],
@@ -2164,16 +2231,24 @@ async def admin_park_today_orders(message: Message) -> None:
     except Exception:
         pass
     now_tashkent = datetime.now(TASHKENT_TZ)
-    in_prog_str = f"  └ 🚖 Jarayonda: <b>{stats.get('in_progress_orders',0)} ta</b>\n" if stats.get('in_progress_orders', 0) > 0 else ""
+    in_prog = stats.get("in_progress_orders", 0)
+    in_prog_str = f"  └ 🚖 Jarayonda: <b>{in_prog} ta</b>\n" if in_prog > 0 else ""
+    date_str = now_tashkent.strftime("%d.%m.%Y | %H:%M:%S")
+    tot_ord = stats.get("total_orders", 0)
+    cmp_ord = stats.get("completed_orders", 0)
+    tot_earn = fmt_sum(stats.get("total_earnings", 0))
+    crd_earn = fmt_sum(stats.get("card_earnings", 0))
+    csh_earn = fmt_sum(stats.get("cash_earnings", 0))
+
     await message.answer(
         f"🚖 <b>Bugungi Park Buyurtmalari (Real vaqt):</b>\n"
-        f"📅 {now_tashkent.strftime('%d.%m.%Y | %H:%M:%S')}\n\n"
-        f"🚕 Jami: <b>{stats.get('total_orders',0)} ta</b>\n"
-        f"  └ ✅ Tugallangan: <b>{stats.get('completed_orders',0)} ta</b>\n"
+        f"📅 {date_str}\n\n"
+        f"🚕 Jami: <b>{tot_ord} ta</b>\n"
+        f"  └ ✅ Tugallangan: <b>{cmp_ord} ta</b>\n"
         f"{in_prog_str}\n"
-        f"💰 Aylanma: <b>{fmt_sum(stats.get('total_earnings',0))} so'm</b>\n"
-        f"  └ 💳 Karta: <b>{fmt_sum(stats.get('card_earnings',0))}</b>\n"
-        f"  └ 💵 Naqd: <b>{fmt_sum(stats.get('cash_earnings',0))}</b>"
+        f"💰 Aylanma: <b>{tot_earn} so'm</b>\n"
+        f"  └ 💳 Karta: <b>{crd_earn}</b>\n"
+        f"  └ 💵 Naqd: <b>{csh_earn}</b>"
     )
 
 
@@ -2182,17 +2257,27 @@ async def admin_stats_handler(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
     stats = await db_get_stats()
+    tot_u = stats.get("total_users", 0)
+    bot_u = stats.get("bot_users", 0)
+    reg_d = stats.get("registered_drivers", 0)
+    y_lnk = stats.get("yandex_linked", 0)
+    td_w = fmt_sum(stats.get("today_withdrawn", 0))
+    mn_w = fmt_sum(stats.get("month_withdrawn", 0))
+    tt_w = fmt_sum(stats.get("total_withdrawn", 0))
+    pn_c = stats.get("pending_count", 0)
+    pn_s = fmt_sum(stats.get("pending_sum", 0))
+
     await message.answer(
         f"📊 <b>{BOT_NAME} — Statistika:</b>\n\n"
-        f"👥 Jami ro'yxatdagilar: <b>{stats.get('total_users',0)} ta</b>\n"
-        f"🤖 Botga ulangan haydovchilar: <b>{stats.get('bot_users',0)} ta</b>\n"
-        f"🚕 Ro'yxatdan o'tganlar: <b>{stats.get('registered_drivers',0)} ta</b>\n"
-        f"🔗 Yandex ulangan: <b>{stats.get('yandex_linked',0)} ta</b>\n"
+        f"👥 Jami ro'yxatdagilar: <b>{tot_u} ta</b>\n"
+        f"🤖 Botga ulangan haydovchilar: <b>{bot_u} ta</b>\n"
+        f"🚕 Ro'yxatdan o'tganlar: <b>{reg_d} ta</b>\n"
+        f"🔗 Yandex ulangan: <b>{y_lnk} ta</b>\n"
         f"➖➖➖\n"
-        f"📅 Bugun yechilgan: <b>{fmt_sum(stats.get('today_withdrawn',0))}</b>\n"
-        f"🗓 Oyda: <b>{fmt_sum(stats.get('month_withdrawn',0))}</b>\n"
-        f"💸 Jami: <b>{fmt_sum(stats.get('total_withdrawn',0))}</b>\n\n"
-        f"⏳ Kutilayotgan: <b>{stats.get('pending_count',0)} ta</b> ({fmt_sum(stats.get('pending_sum',0))})"
+        f"📅 Bugun yechilgan: <b>{td_w}</b>\n"
+        f"🗓 Oyda: <b>{mn_w}</b>\n"
+        f"💸 Jami: <b>{tt_w}</b>\n\n"
+        f"⏳ Kutilayotgan: <b>{pn_c} ta</b> ({pn_s})"
     )
 
 
@@ -2204,8 +2289,10 @@ async def admin_export_excel(message: Message) -> None:
     try:
         excel_bytes = await generate_monthly_excel_report()
         now = datetime.now(TASHKENT_TZ)
-        file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_{now.strftime('%Y_%m_%d_%H%M')}.xlsx")
-        await bot.send_document(chat_id=message.chat.id, document=file, caption=f"📊 <b>{now.year}-yil {UZ_MONTHS.get(now.month,'')} hisoboti</b>")
+        time_fn = now.strftime("%Y_%m_%d_%H%M")
+        file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_{time_fn}.xlsx")
+        m_name = UZ_MONTHS.get(now.month, "")
+        await bot.send_document(chat_id=message.chat.id, document=file, caption=f"📊 <b>{now.year}-yil {m_name} hisoboti</b>")
         try:
             await status_msg.delete()
         except Exception:
@@ -2223,7 +2310,8 @@ async def admin_sync_all_drivers(message: Message) -> None:
     try:
         drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
         if not drivers:
-            await status_msg.edit_text(f"❌ <b>Yandex dan ma'lumot olinmadi!</b>\n\n<code>{esc(err_msg or 'Noma\'lum xatolik')}</code>")
+            err_d = esc(err_msg or "Noma'lum xatolik")
+            await status_msg.edit_text(f"❌ <b>Yandex dan ma'lumot olinmadi!</b>\n\n<code>{err_d}</code>")
             return
 
         pending_yandex_ids = await db_get_pending_yandex_ids()
@@ -2291,17 +2379,20 @@ async def admin_sync_all_drivers(message: Message) -> None:
                     inserted_count += 1
                 conn.close()
 
+        p_len = len(pending_yandex_ids)
+        d_len = len(drivers)
         await status_msg.edit_text(
             f"✅ <b>Yandex sinxronlash yakunlandi!</b>\n\n"
-            f"🚕 Jami Yandex haydovchilari: <b>{len(drivers)} ta</b>\n"
+            f"🚕 Jami Yandex haydovchilari: <b>{d_len} ta</b>\n"
             f"🆕 Yangi kiritilgan: <b>{inserted_count} ta</b>\n"
             f"🔄 Yangilangan: <b>{updated_count} ta</b>\n"
-            f"🔒 Ariza kutilayotgan: <b>{len(pending_yandex_ids)} ta</b>"
+            f"🔒 Ariza kutilayotgan: <b>{p_len} ta</b>"
         )
     except Exception as e:
         logger.error(f"Sync xatosi: {e}")
         try:
-            await status_msg.edit_text(f"❌ Xatolik: <code>{esc(str(e))}</code>")
+            err_str = esc(str(e))
+            await status_msg.edit_text(f"❌ Xatolik: <code>{err_str}</code>")
         except Exception:
             pass
 
@@ -2312,10 +2403,8 @@ async def admin_list_drivers(message: Message) -> None:
         return
     wait_msg = await message.answer("⏳ <i>Botga ulangan haydovchilar ro'yxati va jonli holati olinmoqda...</i>")
 
-    # 1. Botga ulangan (100 ga yaqin) barcha haydovchilar
     drivers = await db_get_all_bot_drivers()
 
-    # 2. Yandexdan real vaqt statuslari va jonli balans
     y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=False)
     y_map_by_id = {d.get("driver_profile", {}).get("id"): yandex_api._normalize(d) for d in y_drivers}
     y_map_by_phone = {re.sub(r"\D", "", n.get("phone", ""))[-9:]: n for n in y_map_by_id.values() if n.get("phone")}
@@ -2329,10 +2418,11 @@ async def admin_list_drivers(message: Message) -> None:
         await message.answer("Hozircha botda ro'yxatdan o'tgan haydovchi yo'q.")
         return
 
-    await message.answer(f"👥 <b>Botga Ulangan Haydovchilar (Jami: {len(drivers)} ta) — Real vaqt:</b>")
+    d_total = len(drivers)
+    await message.answer(f"👥 <b>Botga Ulangan Haydovchilar (Jami: {d_total} ta) — Real vaqt:</b>")
 
     chunk_size = 10
-    for chunk_start in range(0, len(drivers), chunk_size):
+    for chunk_start in range(0, d_total, chunk_size):
         chunk = drivers[chunk_start:chunk_start + chunk_size]
         text = ""
         for idx, drv in enumerate(chunk, chunk_start + 1):
@@ -2350,9 +2440,15 @@ async def admin_list_drivers(message: Message) -> None:
                 bal_str = fmt_sum(drv.get("balance", 0))
 
             card_str = mask_card(drv.get("card_number", ""))
+            pos = drv.get("position", "N/A")
+            fn = esc(drv.get("full_name", "Haydovchi"))
+            ph = esc(drv.get("phone", ""))
+            cm = esc(drv.get("car_model", ""))
+            cn = esc(drv.get("car_number", ""))
+
             text += (
-                f"<b>{idx}.</b> {status} | 🆔 <code>{drv.get('position','N/A')}</code> — <b>{esc(drv.get('full_name','Haydovchi'))}</b>\n"
-                f"   📱 <code>{esc(drv.get('phone',''))}</code> | 🚗 {esc(drv.get('car_model',''))} ({esc(drv.get('car_number',''))})\n"
+                f"<b>{idx}.</b> {status} | 🆔 <code>{pos}</code> — <b>{fn}</b>\n"
+                f"   📱 <code>{ph}</code> | 🚗 {cm} ({cn})\n"
                 f"   💳 <code>{card_str}</code> | 💰 Balans: <b>{bal_str} so'm</b>\n"
                 f"---------------------------\n"
             )
@@ -2381,16 +2477,24 @@ async def admin_delete_driver_find(message: Message, state: FSMContext) -> None:
         return
     driver = await db_find_driver_by_query((message.text or "").strip())
     if not driver:
-        await message.answer(f"❌ '{esc(message.text)}' topilmadi!", reply_markup=cancel_kb(lang))
+        msg_t = esc(message.text)
+        await message.answer(f"❌ '{msg_t}' topilmadi!", reply_markup=cancel_kb(lang))
         return
     await state.clear()
+    pos = driver.get("position", "N/A")
+    fn = esc(driver.get("full_name", ""))
+    ph = esc(driver.get("phone", ""))
+    cm = esc(driver.get("car_model", ""))
+    cn = esc(driver.get("car_number", ""))
+    b_val = fmt_sum(driver.get("balance", 0))
+
     info_txt = (
         f"⚠ <b>O'chirasizmi?</b>\n\n"
-        f"🆔 <code>{driver.get('position','N/A')}</code>\n"
-        f"👤 <b>{esc(driver.get('full_name',''))}</b>\n"
-        f"📱 <code>{esc(driver.get('phone',''))}</code>\n"
-        f"🚗 {esc(driver.get('car_model',''))} ({esc(driver.get('car_number',''))})\n"
-        f"💰 {fmt_sum(driver.get('balance',0))}"
+        f"🆔 <code>{pos}</code>\n"
+        f"👤 <b>{fn}</b>\n"
+        f"📱 <code>{ph}</code>\n"
+        f"🚗 {cm} ({cn})\n"
+        f"💰 {b_val}"
     )
     confirm_kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🗑 Ha, o'chirish", callback_data=f"del_confirm:{driver['id']}"),
@@ -2439,7 +2543,8 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     users = await db_get_bot_users_for_broadcast()
-    status_msg = await message.answer(f"⏳ <i>{len(users)} ta haydovchiga yuborilmoqda...</i>")
+    u_len = len(users)
+    status_msg = await message.answer(f"⏳ <i>{u_len} ta haydovchiga yuborilmoqda...</i>")
     sent = 0
     fail = 0
     for u in users:
@@ -2455,7 +2560,7 @@ async def admin_broadcast_send(message: Message, state: FSMContext) -> None:
         f"📢 <b>Xabar tarqatish yakunlandi!</b>\n\n"
         f"✅ Yetkazildi: <b>{sent} ta</b>\n"
         f"❌ Yetmadi (bloklagan): <b>{fail} ta</b>\n"
-        f"📊 Jami bot foydalanuvchisi: <b>{len(users)} ta</b>"
+        f"📊 Jami bot foydalanuvchisi: <b>{u_len} ta</b>"
     )
     await message.answer("🛠 <b>Admin Panel:</b>", reply_markup=admin_main_kb(lang))
 
@@ -2489,12 +2594,18 @@ async def admin_inactive_drivers(message: Message) -> None:
         await message.answer("✅ Barcha faol!")
         return
 
-    text = f"🚫 <b>10+ kundan beri nofaol ({len(inactive)} ta):</b>\n\n"
+    in_len = len(inactive)
+    text = f"🚫 <b>10+ kundan beri nofaol ({in_len} ta):</b>\n\n"
     for drv in inactive:
+        fn = esc(drv.get("full_name", ""))
+        ph = esc(drv.get("phone", ""))
+        cm = esc(drv.get("car_model", ""))
+        cn = esc(drv.get("car_number", ""))
+        act_date = str(drv.get("last_activity", ""))[:10]
         text += (
-            f"👤 <b>{esc(drv.get('full_name',''))}</b> | 📱 {esc(drv.get('phone',''))}\n"
-            f"🚗 {esc(drv.get('car_model',''))} ({esc(drv.get('car_number',''))})\n"
-            f"📅 {str(drv.get('last_activity',''))[:10]}\n---\n"
+            f"👤 <b>{fn}</b> | 📱 {ph}\n"
+            f"🚗 {cm} ({cn})\n"
+            f"📅 {act_date}\n---\n"
         )
     await message.answer(text)
 
@@ -2609,10 +2720,11 @@ async def monthly_report_scheduler():
             if now.day == 1 and now.hour == 9 and now.month != last_report_month:
                 last_report_month = now.month
                 excel_bytes = await generate_monthly_excel_report()
+                m_name = UZ_MONTHS.get(now.month, "")
                 for adm in ADMIN_IDS:
                     try:
-                        file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_{now.year}_{UZ_MONTHS.get(now.month,'')}.xlsx")
-                        await bot.send_document(chat_id=adm, document=file, caption=f"🗓 <b>{now.year} {UZ_MONTHS.get(now.month,'')} hisoboti</b>")
+                        file = BufferedInputFile(excel_bytes, filename=f"Lochin_Taxi_{now.year}_{m_name}.xlsx")
+                        await bot.send_document(chat_id=adm, document=file, caption=f"🗓 <b>{now.year} {m_name} hisoboti</b>")
                     except Exception:
                         pass
         except Exception as e:
