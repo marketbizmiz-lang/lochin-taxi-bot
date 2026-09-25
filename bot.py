@@ -290,14 +290,15 @@ async def db_get_user_by_phone(phone: str) -> Optional[dict]:
     clean_p = clean_phone_number(phone)
     if not clean_p:
         return None
+    short9 = clean_p[-9:]
     if db_pool:
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM users WHERE phone = $1", clean_p)
+            row = await conn.fetchrow("SELECT * FROM users WHERE phone LIKE $1 OR phone = $2 LIMIT 1", f"%{short9}", clean_p)
             return _process_user_dict(dict(row)) if row else None
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM users WHERE phone = ?", (clean_p,)).fetchone()
+        row = conn.execute("SELECT * FROM users WHERE phone LIKE ? OR phone = ? LIMIT 1", (f"%{short9}", clean_p)).fetchone()
         conn.close()
         return _process_user_dict(dict(row)) if row else None
 
@@ -305,19 +306,20 @@ async def db_get_user_by_phone(phone: str) -> Optional[dict]:
 async def db_find_driver_by_query(query: str) -> Optional[dict]:
     clean_q = query.strip()
     phone_clean = clean_phone_number(clean_q)
+    short9 = phone_clean[-9:] if phone_clean else clean_q
     if db_pool:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT * FROM users WHERE position ILIKE $1 OR (phone = $2 AND $2 != '') OR car_number ILIKE $1",
-                f"%{clean_q}%", phone_clean
+                "SELECT * FROM users WHERE position ILIKE $1 OR phone LIKE $2 OR car_number ILIKE $1 LIMIT 1",
+                f"%{clean_q}%", f"%{short9}%"
             )
             return _process_user_dict(dict(row)) if row else None
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM users WHERE position LIKE ? OR (phone = ? AND ? != '') OR car_number LIKE ?",
-            (f"%{clean_q}%", phone_clean, phone_clean, f"%{clean_q}%")
+            "SELECT * FROM users WHERE position LIKE ? OR phone LIKE ? OR car_number LIKE ? LIMIT 1",
+            (f"%{clean_q}%", f"%{short9}%", f"%{clean_q}%")
         ).fetchone()
         conn.close()
         return _process_user_dict(dict(row)) if row else None
@@ -572,17 +574,21 @@ async def db_get_driver_today_withdrawn(user_id: int) -> int:
 
 
 async def db_get_all_bot_drivers() -> List[dict]:
+    """
+    BOTGA ULANGAN BARCHA FOYDALANUVCHILAR (TELEGRAM ID MAVJUD BO'LGAN BARCHASI).
+    Hech kim tashlab ketilmaydi.
+    """
     if db_pool:
         async with db_pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 AND (is_registered = 1 OR phone IS NOT NULL) ORDER BY id ASC"
+                "SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 ORDER BY id DESC"
             )
             return [_process_user_dict(dict(r)) for r in rows]
     else:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 AND (is_registered = 1 OR phone IS NOT NULL) ORDER BY id ASC"
+            "SELECT * FROM users WHERE telegram_id IS NOT NULL AND telegram_id != 0 ORDER BY id DESC"
         ).fetchall()
         conn.close()
         return [_process_user_dict(dict(r)) for r in rows]
@@ -684,7 +690,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# YANDEX FLEET API
+# YANDEX FLEET API (TO'LIQ REAL INTEGRATSIYA)
 # ============================================================
 
 class YandexFleetAPI:
@@ -697,10 +703,10 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 30
+        self._cache_ttl = 25
         self._stats_cache: Optional[dict] = None
         self._stats_cache_ts: Optional[datetime] = None
-        self._stats_cache_ttl = 30
+        self._stats_cache_ttl = 25
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -718,7 +724,7 @@ class YandexFleetAPI:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(limit=100, limit_per_host=20, enable_cleanup_closed=True)
-            timeout = aiohttp.ClientTimeout(total=40, connect=10)
+            timeout = aiohttp.ClientTimeout(total=45, connect=10)
             self._session = aiohttp.ClientSession(connector=connector, timeout=timeout, headers=self._headers)
         return self._session
 
@@ -795,6 +801,11 @@ class YandexFleetAPI:
         }
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
+        """
+        Barcha haydovchilarni cheklovsiz olish.
+        Yandex Fleet API v1 cursor formatiga to'liq moslangan:
+        Cursor 'cursor' parametrida hamda 'query.cursor' da uzatiladi.
+        """
         if not self._is_configured():
             return [], "Yandex API sozlamalari to'liq emas!"
         now = datetime.now()
@@ -809,7 +820,7 @@ class YandexFleetAPI:
 
         try:
             session = await self._get_session()
-            for _ in range(50):
+            for _ in range(100):  # 100 * 500 = 50 000 tagacha haydovchi
                 payload: Dict[str, Any] = {
                     "query": {
                         "park": {"id": self.park_id}
@@ -818,16 +829,15 @@ class YandexFleetAPI:
                 }
                 if cursor:
                     payload["cursor"] = cursor
+                    payload["query"]["cursor"] = cursor
 
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
                     if resp.status == 429:
                         last_error = "429 Rate Limit"
-                        logger.warning("Yandex 429 Rate Limit")
                         break
                     elif resp.status != 200:
-                        last_error = f"HTTP {resp.status}: {text[:200]}"
-                        logger.error(last_error)
+                        last_error = f"HTTP {resp.status}"
                         break
 
                     data = json.loads(text)
@@ -835,30 +845,29 @@ class YandexFleetAPI:
                     if not batch:
                         break
 
-                    added_in_page = 0
+                    added_count = 0
                     for drv in batch:
                         d_id = drv.get("driver_profile", {}).get("id")
                         if d_id and d_id not in seen_ids:
                             seen_ids.add(d_id)
                             all_drivers.append(drv)
-                            added_in_page += 1
+                            added_count += 1
 
-                    if added_in_page == 0:
+                    if added_count == 0:
                         break
 
+                    # Yandex cursor har xil versiyalarda har joyda keladi
                     new_cursor = data.get("cursor") or data.get("next_cursor") or data.get("pagination", {}).get("next_cursor")
                     if not new_cursor or new_cursor == cursor:
                         break
                     cursor = new_cursor
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.08)
         except Exception as e:
-            last_error = f"Ulanish xatosi: {e}"
-            logger.error(last_error)
+            last_error = str(e)
 
         if all_drivers:
             self._drivers_cache = all_drivers
             self._cache_ts = now
-            logger.info(f"Yandex sinxronlash: jami {len(all_drivers)} ta haydovchi olindi")
             return all_drivers, ""
 
         if self._drivers_cache:
@@ -2306,7 +2315,7 @@ async def admin_export_excel(message: Message) -> None:
 async def admin_sync_all_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    status_msg = await message.answer("⏳ <i>Yandex dagi barcha haydovchilar to'liq tortib olinmoqda (1000+ ta cheklovsiz)...</i>")
+    status_msg = await message.answer("⏳ <i>Yandex bazasi yuklanmoqda...</i>")
     try:
         drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
         if not drivers:
@@ -2328,14 +2337,15 @@ async def admin_sync_all_drivers(message: Message) -> None:
             bal = int(norm["balance"])
             phone = norm["phone"]
             p_clean = clean_phone_number(phone) if phone else ""
+            short9 = p_clean[-9:] if p_clean else ""
             full_name = norm["full_name"]
             car_model = norm["car_model"]
             car_num = norm["car_number"]
 
             if db_pool:
                 async with db_pool.acquire() as conn:
-                    if p_clean:
-                        row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 OR phone=$2 LIMIT 1", y_id, p_clean)
+                    if short9:
+                        row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 OR phone LIKE $2 LIMIT 1", y_id, f"%{short9}")
                     else:
                         row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 LIMIT 1", y_id)
                     if row:
@@ -2356,8 +2366,8 @@ async def admin_sync_all_drivers(message: Message) -> None:
             else:
                 conn = sqlite3.connect(DB_PATH, timeout=10)
                 conn.row_factory = sqlite3.Row
-                if p_clean:
-                    row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? OR phone=? LIMIT 1", (y_id, p_clean)).fetchone()
+                if short9:
+                    row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? OR phone LIKE ? LIMIT 1", (y_id, f"%{short9}")).fetchone()
                 else:
                     row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? LIMIT 1", (y_id,)).fetchone()
                 if row:
@@ -2415,7 +2425,7 @@ async def admin_list_drivers(message: Message) -> None:
         pass
 
     if not drivers:
-        await message.answer("Hozircha botda ro'yxatdan o'tgan haydovchi yo'q.")
+        await message.answer("Hozircha botda haydovchi yo'q.")
         return
 
     d_total = len(drivers)
@@ -2666,10 +2676,11 @@ async def yandex_auto_sync_scheduler():
                     if not y_id:
                         continue
                     p_clean = clean_phone_number(norm["phone"]) if norm["phone"] else ""
+                    short9 = p_clean[-9:] if p_clean else ""
                     if db_pool:
                         async with db_pool.acquire() as conn:
-                            if p_clean:
-                                row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 OR phone=$2 LIMIT 1", y_id, p_clean)
+                            if short9:
+                                row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 OR phone LIKE $2 LIMIT 1", y_id, f"%{short9}")
                             else:
                                 row = await conn.fetchrow("SELECT id FROM users WHERE yandex_driver_id=$1 LIMIT 1", y_id)
                             if row:
@@ -2688,8 +2699,8 @@ async def yandex_auto_sync_scheduler():
                     else:
                         conn = sqlite3.connect(DB_PATH, timeout=10)
                         conn.row_factory = sqlite3.Row
-                        if p_clean:
-                            row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? OR phone=? LIMIT 1", (y_id, p_clean)).fetchone()
+                        if short9:
+                            row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? OR phone LIKE ? LIMIT 1", (y_id, f"%{short9}")).fetchone()
                         else:
                             row = conn.execute("SELECT id FROM users WHERE yandex_driver_id=? LIMIT 1", (y_id,)).fetchone()
                         if row:
