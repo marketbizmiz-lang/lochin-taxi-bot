@@ -104,6 +104,15 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
+# Kapitalbank OpenAPI sozlamalari (Render Environment orqali xavfsiz olinadi)
+KAPITAL_API_URL = os.getenv("KAPITAL_API_URL", "https://m.bank24.uz:2713").strip()
+KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "").strip()
+KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "").strip()
+KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "").strip()  # 20208...
+KAPITAL_MFO = os.getenv("KAPITAL_MFO", "").strip()          # Masalan: 00974
+KAPITAL_INN = os.getenv("KAPITAL_INN", "").strip()          # Tashkilot INN
+KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", BOT_NAME).strip()
+
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
 MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))
 COMMISSION_PERCENT = float(os.getenv("COMMISSION_PERCENT", "0.0"))
@@ -732,8 +741,8 @@ async def db_get_stats() -> dict:
         month_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed' AND updated_at >= ?", (month_start,)).fetchone()[0]
         total_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
 
-        pending_count   = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'").fetchone()[0]
-        pending_sum     = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'").fetchone()[0]
+        pending_count   = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'") or 0
+        pending_sum     = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'") or 0
         total_comm      = conn.execute("SELECT COALESCE(SUM(commission),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
         conn.close()
 
@@ -825,10 +834,10 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 60  # Yandex 429 xatosidan himoyalash uchun 60 soniya kesh
+        self._cache_ttl = 60
         self._stats_cache: Optional[dict] = None
         self._stats_cache_ts: Optional[datetime] = None
-        self._stats_cache_ttl = 30  # Zakazlar uchun 30 soniya kesh
+        self._stats_cache_ttl = 30
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -1215,7 +1224,132 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 5. EXCEL HISOBOT
+# 5. KAPITALBANK OPENAPI (IP-BOUND SECURE INTEGRATION)
+# ============================================================
+
+class KapitalBankAPI:
+    def __init__(self):
+        self.base_url = KAPITAL_API_URL.rstrip("/")
+        self.login = KAPITAL_LOGIN
+        self.password = KAPITAL_PASSWORD
+        self.account = KAPITAL_ACCOUNT
+        self.mfo = KAPITAL_MFO
+        self.inn = KAPITAL_INN
+        self.company_name = KAPITAL_COMPANY_NAME
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    def is_configured(self) -> bool:
+        return bool(self.login and self.password and self.account and self.mfo)
+
+    @property
+    def auth_header(self) -> str:
+        # Basic auth (IP bilan bog'langan xavfsiz ulanish)
+        # IBK yoki Mobil ilova loginiga qarab prefiks avtomatik o'rnatiladi
+        prefix = "" if self.login.startswith("IB#") else "IB#"
+        raw_cred = f"{prefix}{self.login}:{self.password}"
+        enc = base64.b64encode(raw_cred.encode("utf-8")).decode("ascii")
+        return f"Basic {enc}"
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=25),
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": self.auth_header
+                }
+            )
+        return self._session
+
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    async def send_card_payout(self, target_card: str, amount_sum: int, doc_id: int) -> Tuple[bool, str, str]:
+        """
+        Kapitalbank OpenAPI orqali kartani to'ldirish (dtype="97").
+        amount_sum — so'mda (masalan, 50000 so'm).
+        Bankka tiyinlarda yuboriladi (amount_sum * 100).
+        """
+        if not self.is_configured():
+            return False, "Kapitalbank API sozlamalari to'liq emas (.env faylda KAPITAL_* o'zgaruvchilarni tekshiring)", ""
+
+        clean_card = re.sub(r"\D", "", str(target_card))
+        if len(clean_card) != 16:
+            return False, "Plastik karta raqami noto'g'ri (16 ta raqam bo'lishi shart)", ""
+
+        # Hujjat bo'yicha summa tiyinlarda uzatiladi
+        amount_tiyin = int(amount_sum) * 100
+
+        now_tashkent = datetime.now(TASHKENT_TZ)
+        date_str = now_tashkent.strftime("%d.%m.%Y")
+        now_micro = now_tashkent.strftime("%Y%m%d%H%M%S%f")[:17]
+        uniq_id = f"{now_micro}{doc_id}{self.login}"[:35]
+
+        # Hujjatning 13-bet talabi:
+        # dtype = "97", purpose oxirida figurali qavsda to'liq karta raqami bo'lishi shart
+        purpose_text = f"Lochin Taxi to'lovi #{doc_id} {{{clean_card}}}"
+
+        payload = {
+            "client_id": 0,
+            "sid": "",
+            "payment": {
+                "document": {
+                    "num": str(doc_id)[:10],
+                    "branch": self.mfo,
+                    "general_id": None,
+                    "uniq": uniq_id,
+                    "ddate": date_str,
+                    "mfo_dt": self.mfo,
+                    "acc_dt": self.account,
+                    "name_dt": self.company_name,
+                    "inn_dt": self.inn,
+                    "mfo_ct": self.mfo,
+                    "acc_ct": self.account,
+                    "name_ct": "Karta egasi",
+                    "inn_ct": "",
+                    "purpose": purpose_text,
+                    "purp_code": "00699",
+                    "amount": amount_tiyin,
+                    "dtype": "97",
+                    "state": 52,
+                    "dir": 1,
+                    "err": "",
+                    "err_msg": ""
+                },
+                "signs": []
+            }
+        }
+
+        url = f"{self.base_url}/Mobile.svc/SendPayment"
+        try:
+            session = await self._get_session()
+            async with session.post(url, json=payload) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    data = {}
+
+                if resp.status == 200:
+                    err = data.get("error")
+                    if err:
+                        msg = err.get("message") or str(err)
+                        return False, f"Bank xatolik qaytardi: {msg}", ""
+                    res_val = data.get("result")
+                    return True, "To'lov bank tomonidan qabul qilindi!", str(res_val or uniq_id)
+                else:
+                    return False, f"HTTP {resp.status}: {text[:200]}", ""
+        except Exception as e:
+            logger.error(f"Kapitalbank ulanish xatosi: {e}")
+            return False, f"Bankka ulanishda texnik xatolik: {e}", ""
+
+
+kapital_bank_api = KapitalBankAPI()
+
+
+# ============================================================
+# 6. EXCEL HISOBOT
 # ============================================================
 
 async def generate_monthly_excel_report() -> bytes:
@@ -1326,7 +1460,7 @@ async def generate_monthly_excel_report() -> bytes:
 
 
 # ============================================================
-# 6. MATNLAR VA KLAVIATURALAR
+# 7. MATNLAR VA KLAVIATURALAR
 # ============================================================
 
 TEXTS = {
@@ -1478,7 +1612,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
 
 
 # ============================================================
-# 7. ANTI-FLOOD THROTTLING
+# 8. ANTI-FLOOD THROTTLING
 # ============================================================
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -1512,7 +1646,7 @@ class ThrottlingMiddleware(BaseMiddleware):
 
 
 # ============================================================
-# 8. FSM STATES
+# 9. FSM STATES
 # ============================================================
 
 class RegStates(StatesGroup):
@@ -1542,7 +1676,7 @@ class AdminDeleteDriverStates(StatesGroup):
 
 
 # ============================================================
-# 9. DISPATCHER VA ROUTERLAR
+# 10. DISPATCHER VA ROUTERLAR
 # ============================================================
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -1637,7 +1771,7 @@ async def lang_callback(callback: CallbackQuery) -> None:
 
 
 # ============================================================
-# 10. RO'YXATDAN O'TISH HANDLERLARI
+# 11. RO'YXATDAN O'TISH HANDLERLARI
 # ============================================================
 
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]), StateFilter("*"))
@@ -1816,7 +1950,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
 
 
 # ============================================================
-# 11. BALANS (REAL VAQT)
+# 12. BALANS (REAL VAQT)
 # ============================================================
 
 @router.message(F.text.in_(["💰 Balans", "💰 Баланс"]))
@@ -1898,7 +2032,7 @@ async def balance_handler(message: Message) -> None:
 
 
 # ============================================================
-# 12. BUGUNGI BUYURTMALAR (REAL VAQT)
+# 13. BUGUNGI BUYURTMALAR (REAL VAQT)
 # ============================================================
 
 @router.message(F.text.in_(["📊 Bugungi buyurtmalar", "📊 Сегодняшние заказы"]))
@@ -1951,7 +2085,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 13. PUL YECHISH (24/7)
+# 14. PUL YECHISH (24/7)
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -2108,9 +2242,13 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         f"🚖 <b>Yandex Pro:</b> {y_status_txt}"
     )
 
+    # Kapitalbank avto-to'lov tugmasi bilan boyitilgan klaviatura
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ To'landi (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}"),
+            InlineKeyboardButton(text="💳 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")
+        ],
+        [
+            InlineKeyboardButton(text="✅ Qo'lda to'landi (Yandexdan yechish)", callback_data=f"adm_pay:{w_id}"),
             InlineKeyboardButton(text="❌ Rad etish", callback_data=f"adm_rej:{w_id}")
         ],
         [
@@ -2127,8 +2265,80 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
 
 # ============================================================
-# 14. ADMIN TASDIQLASH VA RAD ETISH
+# 15. ADMIN TASDIQLASH, KAPITALBANK TO'LOV VA RAD ETISH
 # ============================================================
+
+@admin_router.callback_query(F.data.startswith("adm_kapital:"))
+async def admin_kapitalbank_payout(callback: CallbackQuery):
+    """Kapitalbank OpenAPI orqali kartaga to'g'ridan-to'g'ri to'lash"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q!", show_alert=True)
+        return
+
+    w_id = int(callback.data.split(":")[1])
+    wd = await db_get_withdrawal(w_id)
+    if not wd or wd.get("status") != "pending":
+        await callback.answer("Bu ariza allaqachon ko'rib chiqilgan!", show_alert=True)
+        return
+
+    user = await db_get_user_by_id(wd["user_id"])
+    if not user:
+        await callback.answer("Haydovchi topilmadi!", show_alert=True)
+        return
+
+    card_num = wd.get("card_number") or ""
+    net_amount = int(wd.get("net_amount", 0))
+
+    await callback.answer("⏳ Kapitalbankka to'lov so'rovi yuborilmoqda...")
+
+    # 1. Kapitalbank API ga so'rov yuborish
+    success, bank_msg, tx_id = await kapital_bank_api.send_card_payout(
+        target_card=card_num,
+        amount_sum=net_amount,
+        doc_id=w_id
+    )
+
+    if not success:
+        # Bank rad etsa, adminga xabar beriladi, ariza yopilmaydi
+        await callback.message.reply(
+            f"❌ <b>Kapitalbank to'lovida xatolik yuz berdi!</b>\n\n"
+            f"🔍 <b>Sabab:</b> <code>{bank_msg}</code>\n\n"
+            f"<i>Pul kartaga o'tmadi va Yandexdan yechilmadi. Qayta urinib ko'rishingiz yoki 'Qo'lda to'landi' tugmasini bosishingiz mumkin.</i>"
+        )
+        return
+
+    # 2. Bank to'lovni qabul qilsa, Yandex Pro balansidan yechish
+    if user.get("yandex_driver_id"):
+        await yandex_api.create_transaction(
+            user["yandex_driver_id"],
+            int(wd["amount"]),
+            f"Kapitalbank to'lovi #{w_id} ({mask_card(card_num)})"
+        )
+
+    # 3. Statusni yangilash
+    await db_update_withdrawal_status(w_id, "completed", ext_tx_id=tx_id)
+
+    try:
+        await callback.message.edit_text(
+            f"{callback.message.text}\n\n"
+            f"✅ <b>KAPITALBANK ORQALI TO'LANDI VA YANDEXDAN YECHILDI!</b>\n"
+            f"🏦 Tranzaksiya: <code>{tx_id}</code>\n"
+            f"👨💻 Admin: {callback.from_user.full_name}"
+        )
+    except Exception:
+        pass
+
+    try:
+        await bot.send_message(
+            user["telegram_id"],
+            f"✅ <b>Pul yechish arizangiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
+            f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> Kapitalbank orqali kartangizga muvaffaqiyatli o'tkazildi.\n"
+            f"💳 Karta: <code>{mask_card(card_num)}</code>\n\n"
+            f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>"
+        )
+    except Exception:
+        pass
+
 
 @admin_router.callback_query(F.data.startswith("adm_pay:"))
 async def admin_approve_payout(callback: CallbackQuery):
@@ -2212,7 +2422,7 @@ async def admin_reject_payout(callback: CallbackQuery):
 
 
 # ============================================================
-# 15. PROFIL, TOP, SOS
+# 16. PROFIL, TOP, SOS
 # ============================================================
 
 @router.message(F.text.in_(["👤 Profil", "👤 Профиль"]))
@@ -2430,7 +2640,7 @@ async def sos_receive_text_message(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# 16. ADMIN PANEL (REAL VAQT TRANZAKSIYA VA ZAKAZLAR)
+# 17. ADMIN PANEL (REAL VAQT TRANZAKSIYA VA ZAKAZLAR)
 # ============================================================
 
 @admin_router.message(F.text.in_(["🛠 Admin Panel", "🛠 Админ Панель"]), StateFilter("*"))
@@ -2498,7 +2708,10 @@ async def admin_pending_withdrawals_list(message: Message):
 
         adm_kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ To'landi (Yopish)", callback_data=f"adm_pay:{w_id}"),
+                InlineKeyboardButton(text="💳 Kapitalbank orqali to'lash", callback_data=f"adm_kapital:{w_id}")
+            ],
+            [
+                InlineKeyboardButton(text="✅ Qo'lda to'landi (Yopish)", callback_data=f"adm_pay:{w_id}"),
                 InlineKeyboardButton(text="❌ Rad etish (Qaytarish)", callback_data=f"adm_rej:{w_id}")
             ]
         ])
@@ -2926,7 +3139,7 @@ async def back_to_user_menu(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# 17. AVTOMATIK SCHEDULERLAR
+# 18. AVTOMATIK SCHEDULERLAR
 # ============================================================
 
 async def daily_morning_reminder():
@@ -3048,7 +3261,7 @@ async def monthly_report_scheduler():
 
 
 # ============================================================
-# 18. WEB SERVER (RENDER / DOCKER HEALTH CHECKS)
+# 19. WEB SERVER (RENDER / DOCKER HEALTH CHECKS)
 # ============================================================
 
 routes = web.RouteTableDef()
@@ -3071,7 +3284,7 @@ async def start_web_server():
 
 
 # ============================================================
-# 19. MAIN ASYNC RUNNER
+# 20. MAIN ASYNC RUNNER
 # ============================================================
 
 async def main() -> None:
@@ -3094,6 +3307,7 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         await yandex_api.close()
+        await kapital_bank_api.close()
         if db_pool:
             await db_pool.close()
 
