@@ -837,7 +837,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (KUCHAYTIRILGAN ENGINE)
+# 4. YANDEX FLEET API (KUCHAYTIRILGAN CURSOR ENGINE)
 # ============================================================
 
 class YandexFleetAPI:
@@ -947,6 +947,10 @@ class YandexFleetAPI:
         }
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
+        """
+        1000+ haydovchilarni to'liq (cursor yordamida) tortib olish.
+        Endi 500 tadan keyin to'xtab qolmaydi!
+        """
         if not self._is_configured():
             return [], "Yandex API sozlamalari (.env) to'liq kiritilmagan!"
 
@@ -957,17 +961,21 @@ class YandexFleetAPI:
 
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
         all_drivers: List[dict] = []
-        limit, offset = 500, 0
         last_error = ""
+        cursor = None
 
         try:
             session = await self._get_session()
-            for _ in range(15):
+            for _ in range(25):  # 25 * 500 = 12 500 tagacha haydovchini qo'llab-quvvatlaydi
                 payload = {
-                    "query": {"park": {"id": self.park_id}},
-                    "limit": limit,
-                    "offset": offset
+                    "query": {
+                        "park": {"id": self.park_id}
+                    },
+                    "limit": 500
                 }
+                if cursor:
+                    payload["cursor"] = cursor
+
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
                     if resp.status == 429:
@@ -981,10 +989,13 @@ class YandexFleetAPI:
                     data = json.loads(text)
                     batch = data.get("driver_profiles", [])
                     all_drivers.extend(batch)
-                    if len(batch) < limit:
+
+                    cursor = data.get("cursor")
+                    # Agar keyingi sahifa bo'lmasa yoki bo'sh batch kelsa, demak hammasi olib bo'lindi
+                    if not cursor or len(batch) == 0:
                         break
-                    offset += limit
-                    await asyncio.sleep(0.08)
+
+                    await asyncio.sleep(0.1)
         except Exception as e:
             last_error = f"Ulanish xatosi: {str(e)}"
 
@@ -1463,7 +1474,7 @@ async def generate_monthly_excel_report() -> bytes:
 
 
 # ============================================================
-# 7. MATNLAR VA KLAVIATURALAR
+# 7. MATNLAR VA KLAVIATURALAR (TOP HAYDOVCHILAR OLIB TASHLANDI)
 # ============================================================
 
 TEXTS = {
@@ -1540,7 +1551,7 @@ def t(lang_code: str, key: str, **kwargs) -> str:
 
 
 def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
-    # "Top haydovchilar" tugmasi olib tashlandi
+    # "Top haydovchilar" olib tashlandi, faqat zarur 6 ta tugma
     buttons = [
         [KeyboardButton(text=t(lang, "menu_balance")), KeyboardButton(text=t(lang, "menu_withdraw"))],
         [KeyboardButton(text=t(lang, "menu_orders")), KeyboardButton(text=t(lang, "menu_profile"))],
@@ -2112,7 +2123,7 @@ async def orders_handler(message: Message) -> None:
 
 
 # ============================================================
-# 14. PUL YECHISH
+# 14. PUL YECHISH (AVTOMATIK ASOSIY MENYUGA QAYTISH BILAN)
 # ============================================================
 
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
@@ -2190,10 +2201,10 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
     full_card_val = user.get("card_number") or ""
     rem_deposit = cur_bal - amount
 
-    # State'ni tozalaymiz
+    # State'ni zudlik bilan tozalaymiz
     await state.clear()
 
-    # Bazada tranzaksiya yaratamiz
+    # Bazada arizani saqlaymiz
     try:
         w_id = await db_create_withdrawal(
             user_id=user["id"], telegram_id=uid, amount=amount, commission=comm,
@@ -2204,18 +2215,18 @@ async def withdraw_amount_step(message: Message, state: FSMContext) -> None:
         await message.answer(f"❌ Xatolik: {val_err}", reply_markup=user_main_kb(lang, uid))
         return
 
-    # 1. HAYDOVCHIGA ANIQ VA ROVON XABAR VA DASTUR BOSH MENYUGA O'TADI
+    # 1. HAYDOVCHIGA XABAR VA DASTUR DARHOL ASOSIY MENYUGA QAYTADI
     masked_c = mask_card(full_card_val)
     await message.answer(
         f"⏳ <b>Arizangiz qabul qilindi! (Ariza #{w_id})</b>\n\n"
         f"💰 Yechilayotgan summa: <b>{fmt_sum(amount)} so'm</b>\n"
         f"💵 Kartaga tushadi: <b>{fmt_sum(net)} so'm</b>\n"
         f"💳 Karta: <code>{masked_c}</code>\n\n"
-        f"👨💻 <i>Hozirda ariza administrator tekshiruvida. Admin tasdiqlashi bilan pul kartangizga o'tkaziladi.</i>",
+        f"👨💻 <i>Admin tasdiqlashini kuting. Tasdiqlangach, pulingiz kartangizga o'tkazib beriladi.</i>",
         reply_markup=user_main_kb(lang, uid)
     )
 
-    # 2. ADMINGA XABARDOR QILISH VA TO'LOV TUGMALARI
+    # 2. ADMINGA TO'LOV VA TASDIQ TUGMALARI
     y_status_txt = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
     u_pos = user.get("position", "N/A")
     u_name = esc(user.get("full_name", ""))
@@ -2294,7 +2305,7 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
         await callback.message.reply(
             f"❌ <b>Kapitalbank to'lovida xatolik yuz berdi!</b>\n\n"
             f"🔍 <b>Sabab:</b> <code>{esc(bank_msg)}</code>\n\n"
-            f"<i>Pul kartaga o'tmadi va Yandexdan yechilmadi. Qayta urinib ko'rishingiz yoki 'Click / Payme orqali to'landi' tugmasini bosishingiz mumkin.</i>"
+            f"<i>Bank yopiq bo'lsa yoki xatolik bersa, 'Click / Payme orqali to'landi' tugmasidan foydalanishingiz mumkin.</i>"
         )
         return
 
@@ -2321,10 +2332,11 @@ async def admin_kapitalbank_payout(callback: CallbackQuery):
         await bot.send_message(
             user["telegram_id"],
             f"✅ <b>So'rovingiz tasdiqlandi! (Ariza #{w_id})</b>\n\n"
-            f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> Kapitalbank orqali kartangizga muvaffaqiyatli o'tkazildi.\n"
+            f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> Kapitalbank orqali kartangizga o'tkazildi.\n"
             f"💳 Karta: <code>{mask_card(card_num)}</code>\n\n"
             f"⏳ <i>Kuting, pulingiz 5 daqiqada kartangizga o'tkazib beriladi.</i>\n"
-            f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>"
+            f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>",
+            reply_markup=user_main_kb("uz", user["telegram_id"])
         )
     except Exception:
         pass
@@ -2351,7 +2363,7 @@ async def admin_approve_payout(callback: CallbackQuery):
         await yandex_api.create_transaction(
             user["yandex_driver_id"],
             int(wd["amount"]),
-            f"Lochin Taxi Click/Payme #{w_id} ({mask_card(wd.get('card_number',''))})"
+            f"Click/Payme to'lov #{w_id} ({mask_card(wd.get('card_number',''))})"
         )
 
     await db_update_withdrawal_status(w_id, "completed")
@@ -2371,7 +2383,8 @@ async def admin_approve_payout(callback: CallbackQuery):
             f"💵 <b>{fmt_sum(wd['net_amount'])} so'm</b> kartangizga muvaffaqiyatli o'tkazildi.\n"
             f"💳 Karta: <code>{mask_card(wd.get('card_number',''))}</code>\n\n"
             f"⏳ <i>Kuting, pulingiz 5 daqiqada kartangizga o'tkazib beriladi.</i>\n"
-            f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>"
+            f"<i>Lochin Taxi bilan ishlaganingiz uchun rahmat!</i>",
+            reply_markup=user_main_kb("uz", user["telegram_id"])
         )
     except Exception:
         pass
@@ -2406,7 +2419,8 @@ async def admin_reject_payout(callback: CallbackQuery):
                 user["telegram_id"],
                 f"❌ <b>Pul yechish arizangiz rad etildi! (Ariza #{w_id})</b>\n\n"
                 f"💰 {fmt_sum(wd['amount'])} so'm balansingizga qaytarildi.\n"
-                f"Batafsil ma'lumot olish uchun menejer bilan bog'laning."
+                f"Batafsil ma'lumot olish uchun menejer bilan bog'laning.",
+                reply_markup=user_main_kb("uz", user["telegram_id"])
             )
         except Exception:
             pass
@@ -2789,7 +2803,7 @@ async def admin_export_excel(message: Message) -> None:
 async def admin_sync_all_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar tekshirilmoqda...</i>")
+    status_msg = await message.answer("⏳ <i>Yandex kabinetdagi barcha haydovchilar tekshirilmoqda (1000+ ta)...</i>")
 
     try:
         drivers, err_msg = await yandex_api.get_all_drivers(force_refresh=True)
