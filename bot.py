@@ -104,14 +104,13 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Kapitalbank OpenAPI sozlamalari (Kapitalbank OpenAPI V2 spetsifikatsiyasi bo'yicha)
+# Kapitalbank OpenAPI sozlamalari
 KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "").strip()
 KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", "").strip()
 KAPITAL_INN = os.getenv("KAPITAL_INN", "").strip()
 KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "").strip()
 KAPITAL_MFO = os.getenv("KAPITAL_MFO", "").strip()
 KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "").strip()
-# Rasmiy qo'llanmadagi ishchi URL: https://m.bank24.uz:2713
 KAPITAL_BASE_URL = os.getenv("KAPITAL_BASE_URL", "").strip() or "https://m.bank24.uz:2713"
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
@@ -186,7 +185,7 @@ def tashkent_now_iso() -> str:
 
 
 # ============================================================
-# 3. DATABASE LAYER
+# 3. DATABASE LAYER (RENDER POSTGRESQL + SAFE FALLBACK)
 # ============================================================
 
 db_pool: Optional[asyncpg.Pool] = None
@@ -210,8 +209,8 @@ async def init_database():
                 clean_url,
                 ssl="require",
                 min_size=2,
-                max_size=20,
-                timeout=20,
+                max_size=15,
+                timeout=15,
                 command_timeout=60,
             )
             async with db_pool.acquire() as conn:
@@ -262,7 +261,7 @@ async def init_database():
                     CREATE INDEX IF NOT EXISTS idx_wd_created ON withdrawals(created_at);
                 """)
                 driver_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_registered = 1")
-                logger.info(f"✅ Render PostgreSQL muvaffaqiyatli ulandi! Bazadagi haydovchilar soni: {driver_count} ta")
+                logger.info(f"✅ Render PostgreSQL ulandi! Bazadagi haydovchilar soni: {driver_count} ta")
 
                 owner_tg = await conn.fetchval("SELECT telegram_id FROM users WHERE phone = $1", OWNER_PHONE)
                 if owner_tg:
@@ -777,7 +776,7 @@ async def db_get_stats() -> dict:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (ROBUST REAL-TIME ENGINE)
+# 4. YANDEX FLEET API (RATE LIMITING & ANTI-429 SAFEGUARD)
 # ============================================================
 
 class YandexFleetAPI:
@@ -790,7 +789,8 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 15
+        # Keshlash vaqti 60 sekund (HTTP 429 Limit Exceeded oldini oladi)
+        self._cache_ttl = 60
         self.last_orders_error: str = ""
 
     def _is_configured(self) -> bool:
@@ -808,8 +808,8 @@ class YandexFleetAPI:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            connector = aiohttp.TCPConnector(limit=100, limit_per_host=30, enable_cleanup_closed=True)
-            timeout = aiohttp.ClientTimeout(total=25, connect=7)
+            connector = aiohttp.TCPConnector(limit=50, limit_per_host=10, enable_cleanup_closed=True)
+            timeout = aiohttp.ClientTimeout(total=20, connect=6)
             self._session = aiohttp.ClientSession(connector=connector, timeout=timeout, headers=self._headers)
         return self._session
 
@@ -908,9 +908,10 @@ class YandexFleetAPI:
             return [], "Yandex API kalitlari .env da to'liq emas!"
 
         now = datetime.now()
-        if (not force_refresh and self._drivers_cache and self._cache_ts
-                and (now - self._cache_ts).total_seconds() < self._cache_ttl):
-            return self._drivers_cache, ""
+        # Kesh mavjud bo'lsa va muddati o'tmagan bo'lsa darhol keshdan qaytaramiz
+        if not force_refresh and self._drivers_cache and self._cache_ts:
+            if (now - self._cache_ts).total_seconds() < self._cache_ttl:
+                return self._drivers_cache, ""
 
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
         all_drivers: List[dict] = []
@@ -929,6 +930,12 @@ class YandexFleetAPI:
                 }
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
+                    if resp.status == 429:
+                        last_error = "Yandex Rate Limit (HTTP 429). Keshdan foydalanilmoqda."
+                        logger.warning(last_error)
+                        if self._drivers_cache:
+                            return self._drivers_cache, ""
+                        break
                     if resp.status != 200:
                         last_error = f"HTTP {resp.status}: {text[:250]}"
                         logger.error(f"Yandex get_all_drivers xatosi: {last_error}")
@@ -940,6 +947,7 @@ class YandexFleetAPI:
                     if len(batch) < limit:
                         break
                     offset += limit
+                    await asyncio.sleep(0.1)  # API yuklamasini kamaytirish uchun kichik tanaffus
         except Exception as e:
             last_error = f"Ulanish xatosi: {str(e)}"
             logger.error(f"Yandex get_all_drivers exception: {e}")
@@ -948,6 +956,9 @@ class YandexFleetAPI:
             self._drivers_cache = all_drivers
             self._cache_ts = now
             return all_drivers, ""
+
+        if self._drivers_cache:
+            return self._drivers_cache, ""
 
         return [], last_error
 
@@ -958,7 +969,7 @@ class YandexFleetAPI:
         digits_target = re.sub(r"\D", "", clean_target)
         short9 = digits_target[-9:] if len(digits_target) >= 9 else digits_target
 
-        drivers, _ = await self.get_all_drivers(force_refresh=True)
+        drivers, _ = await self.get_all_drivers(force_refresh=False)
         for raw in drivers:
             prof = raw.get("driver_profile", {})
             phones = prof.get("phones", [])
@@ -974,32 +985,7 @@ class YandexFleetAPI:
         if not self._is_configured():
             return None
 
-        if yandex_driver_id:
-            url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
-            payload = {
-                "query": {
-                    "park": {
-                        "id": self.park_id,
-                        "driver_profile": {
-                            "id": [yandex_driver_id]
-                        }
-                    }
-                },
-                "limit": 1
-            }
-            try:
-                session = await self._get_session()
-                async with session.post(url, json=payload) as resp:
-                    text = await resp.text()
-                    if resp.status == 200:
-                        data = json.loads(text)
-                        drivers = data.get("driver_profiles", [])
-                        if drivers:
-                            return self._extract_balance(drivers[0])
-            except Exception as e:
-                logger.error(f"get_driver_balance exception: {e}")
-
-        drivers, _ = await self.get_all_drivers(force_refresh=True)
+        drivers, _ = await self.get_all_drivers(force_refresh=False)
         clean_p = clean_phone_number(phone) if phone else ""
         digits_target = re.sub(r"\D", "", clean_p)[-9:] if clean_p else ""
 
@@ -1031,7 +1017,7 @@ class YandexFleetAPI:
 
         active_on_order_count = 0
         try:
-            drivers_list, _ = await self.get_all_drivers(force_refresh=True)
+            drivers_list, _ = await self.get_all_drivers(force_refresh=False)
             for d_raw in drivers_list:
                 norm_d = self._normalize(d_raw)
                 if norm_d.get("is_on_order"):
@@ -1045,69 +1031,36 @@ class YandexFleetAPI:
         all_orders: List[dict] = []
         api_error_text = ""
 
-        strategies = [
-            ("booked_at", False),
-            ("ended_at", False),
-            ("booked_at", True),
-        ]
+        order_filter: dict = {
+            "booked_at": {
+                "from": from_utc,
+                "to": to_utc
+            }
+        }
+        park_query: dict = {
+            "id": self.park_id,
+            "order": order_filter
+        }
+        if yandex_driver_id:
+            park_query["driver_profile"] = {"id": [yandex_driver_id]}
 
-        for time_field, with_statuses in strategies:
-            cursor: Optional[str] = None
-            current_orders = []
+        payload: dict = {
+            "query": {"park": park_query},
+            "limit": 500
+        }
 
-            for _ in range(20):
-                order_filter: dict = {
-                    time_field: {
-                        "from": from_utc,
-                        "to": to_utc
-                    }
-                }
-                if with_statuses:
-                    order_filter["statuses"] = ["complete", "cancelled", "driving", "waiting", "transporting"]
-
-                park_query: dict = {
-                    "id": self.park_id,
-                    "order": order_filter
-                }
-                if yandex_driver_id:
-                    park_query["driver_profile"] = {"id": [yandex_driver_id]}
-
-                payload: dict = {
-                    "query": {"park": park_query},
-                    "limit": 500
-                }
-                if cursor:
-                    payload["cursor"] = cursor
-
-                try:
-                    async with session.post(url, json=payload) as resp:
-                        resp_text = await resp.text()
-                        if resp.status != 200:
-                            api_error_text = f"HTTP {resp.status}: {resp_text[:200]}"
-                            logger.error(f"Yandex orders ({time_field}) xatosi: {api_error_text}")
-                            if yandex_driver_id and resp.status in (400, 422):
-                                del park_query["driver_profile"]
-                                async with session.post(url, json={"query": {"park": park_query}, "limit": 500}) as resp2:
-                                    if resp2.status == 200:
-                                        d2 = json.loads(await resp2.text())
-                                        current_orders.extend(d2.get("orders", []))
-                            break
-
-                        data = json.loads(resp_text)
-                        batch = data.get("orders", [])
-                        current_orders.extend(batch)
-
-                        next_cursor = data.get("cursor")
-                        if not next_cursor or next_cursor == cursor or len(batch) < 500:
-                            break
-                        cursor = next_cursor
-                except Exception as e:
-                    api_error_text = f"Tarmoq xatosi: {e}"
-                    break
-
-            if current_orders:
-                all_orders = current_orders
-                break
+        try:
+            async with session.post(url, json=payload) as resp:
+                resp_text = await resp.text()
+                if resp.status == 200:
+                    data = json.loads(resp_text)
+                    all_orders = data.get("orders", [])
+                elif resp.status == 429:
+                    api_error_text = "Yandex so'rovlar chegarasi (429). Birozdan so'ng qayta urinib ko'ring."
+                else:
+                    api_error_text = f"HTTP {resp.status}"
+        except Exception as e:
+            api_error_text = f"Tarmoq xatosi: {e}"
 
         self.last_orders_error = api_error_text
 
@@ -1194,12 +1147,6 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 # ============================================================
 
 class KapitalBankOpenAPI:
-    """
-    Kapitalbank OpenAPI V2 spetsifikatsiyasi bo'yicha integratsiya moduli:
-    URL: https://m.bank24.uz:2713 (Boevoy)
-    Avtorizatsiya: /Mobile.svc/APILogin (Basic auth)
-    To'lov: /Mobile.svc/SendPayment (dtype='97' - Plastik kartani to'ldirish)
-    """
     def __init__(self, login: str, password: str, account: str, mfo: str, inn: str, company: str, base_url: str):
         self.login = login.strip()
         self.password = password.strip()
@@ -1207,7 +1154,6 @@ class KapitalBankOpenAPI:
         self.mfo = mfo.strip()
         self.inn = inn.strip()
         self.company = company.strip()
-        # Rasmiy qo'llanmadagi aniq manzil:
         self.base_url = (base_url or "https://m.bank24.uz:2713").rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None
         self._sid: Optional[str] = None
@@ -1218,7 +1164,6 @@ class KapitalBankOpenAPI:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            # Bank portlari uchun SSL va timeout
             timeout = aiohttp.ClientTimeout(total=20, connect=8)
             self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
@@ -1228,7 +1173,6 @@ class KapitalBankOpenAPI:
             await self._session.close()
 
     def _get_auth_header(self) -> str:
-        # Qo'llanma 4-bet: Agar internet-banking bo'lsa IB# prefiksi
         user_str = self.login if self.login.startswith("IB#") else f"IB#{self.login}"
         auth_bytes = f"{user_str}:{self.password}".encode("utf-8")
         return f"Basic {base64.b64encode(auth_bytes).decode('utf-8')}"
@@ -1265,23 +1209,15 @@ class KapitalBankOpenAPI:
             return False, f"Bank ulanish xatosi: {e}"
 
     async def send_payout(self, card_number: str, amount_sum: int, withdrawal_id: int) -> Tuple[bool, str]:
-        """
-        Qo'llanma 11-13 betlar:
-        dtype = '97' (Пополнение ПК)
-        purpose = 'Lochin Taxi to'lovi {8600...}' (oxirida figurali qavsda to'liq karta)
-        amount = tiyinlarda (so'm * 100)
-        """
         if not self.is_configured():
             return False, "Bank rekvizitlari kiritilmagan"
 
-        # 1. Avval APILogin orqali SID olish
         ok, login_err = await self.login_api()
         if not ok and not self._sid:
-            # Agar login xato bersa (IP cheklovi yoki SMS talabi)
             return False, login_err
 
         clean_card = re.sub(r"\D", "", card_number)
-        amount_tiyin = int(amount_sum) * 100  # Bank tiyinda qabul qiladi
+        amount_tiyin = int(amount_sum) * 100
         now_date_str = datetime.now(TASHKENT_TZ).strftime("%d.%m.%Y")
         now_uniq_str = datetime.now(TASHKENT_TZ).strftime("%Y%m%d%H%M%S") + f"{withdrawal_id}{self.login[:4]}"
 
@@ -1292,7 +1228,6 @@ class KapitalBankOpenAPI:
             "Authorization": self._get_auth_header()
         }
 
-        # Qo'llanma 13-betdagi karta to'ldirish formati
         payload = {
             "client_id": self._client_id or 0,
             "sid": self._sid or "",
@@ -1314,7 +1249,7 @@ class KapitalBankOpenAPI:
                     "purpose": f"Lochin Taxi to'lovi #{withdrawal_id} {{{clean_card}}}",
                     "purp_code": "00699",
                     "amount": amount_tiyin,
-                    "dtype": "97",  # Plastik kartaga to'lov
+                    "dtype": "97",
                     "state": 52,
                     "dir": 1,
                     "err": "",
@@ -1332,7 +1267,6 @@ class KapitalBankOpenAPI:
                     err = data.get("error")
                     if err:
                         return False, f"Bank xatosi: {err.get('message')}"
-                    res_val = data.get("result")
                     return True, f"KAPITAL-KB-{withdrawal_id}"
                 else:
                     return False, f"Bank xatosi (HTTP {resp.status}): {text[:120]}"
@@ -1363,7 +1297,7 @@ def get_payment_deep_links(card_number: str, amount_sum: int) -> Tuple[str, str]
 # ============================================================
 
 async def generate_monthly_excel_report() -> bytes:
-    y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=True)
+    y_drivers, _ = await yandex_api.get_all_drivers(force_refresh=False)
     y_map_by_id = {d.get("driver_profile", {}).get("id"): yandex_api._normalize(d) for d in y_drivers}
 
     drivers = await db_get_all_registered_drivers()
@@ -1959,7 +1893,7 @@ async def finish_registration_process(message: Message, state: FSMContext, data:
 
 
 # ============================================================
-# 11. BALANS (100% REAL VAQT)
+# 11. BALANS (REAL VAQT)
 # ============================================================
 
 @router.message(F.text.in_(["💰 Balans", "💰 Баланс"]))
@@ -1988,26 +1922,12 @@ async def balance_handler(message: Message) -> None:
     else:
         cur_bal = int(user.get("balance", 0) or 0)
 
-    if not y_id and phone:
-        y_drv = await yandex_api.get_driver_by_phone(phone)
-        if y_drv and y_drv.get("id"):
-            y_id = y_drv["id"]
-            now_iso = tashkent_now_iso()
-            if db_pool:
-                async with db_pool.acquire() as conn:
-                    await conn.execute("UPDATE users SET yandex_driver_id=$1, updated_at=$2 WHERE id=$3", y_id, now_iso, user["id"])
-            else:
-                conn = sqlite3.connect(DB_PATH, timeout=10)
-                with conn:
-                    conn.execute("UPDATE users SET yandex_driver_id=?, updated_at=? WHERE id=?", (y_id, now_iso, user["id"]))
-                conn.close()
-
     try:
         await wait_msg.delete()
     except Exception:
         pass
 
-    y_status = "Ulangan ✅ (Real vaqt)" if (y_id or live_bal is not None) else "Ulanmagan ❌"
+    y_status = "Ulangan ✅" if (y_id or live_bal is not None) else "Ulanmagan ❌"
     today_withdrawn = await db_get_driver_today_withdrawn(user["id"])
     avail = max(0, cur_bal - MIN_DEPOSIT)
 
@@ -2070,22 +1990,6 @@ async def orders_handler(message: Message) -> None:
     wait_msg = await message.answer("⏳ <i>Yandex Pro dan shaxsiy buyurtmalaringiz olinmoqda...</i>")
 
     y_id = user.get("yandex_driver_id")
-    phone = user.get("phone")
-
-    if not y_id and phone:
-        y_drv = await yandex_api.get_driver_by_phone(phone)
-        if y_drv and y_drv.get("id"):
-            y_id = y_drv["id"]
-            now_iso = tashkent_now_iso()
-            if db_pool:
-                async with db_pool.acquire() as conn:
-                    await conn.execute("UPDATE users SET yandex_driver_id=$1, updated_at=$2 WHERE id=$3", y_id, now_iso, user["id"])
-            else:
-                conn = sqlite3.connect(DB_PATH, timeout=10)
-                with conn:
-                    conn.execute("UPDATE users SET yandex_driver_id=?, updated_at=? WHERE id=?", (y_id, now_iso, user["id"]))
-                conn.close()
-
     stats = await yandex_api.get_today_orders_stats(yandex_driver_id=y_id) if y_id else {
         "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0, "in_progress_orders": 0,
         "total_earnings": 0, "cash_earnings": 0, "card_earnings": 0, "park_comm": 0, "api_error": ""
@@ -2381,7 +2285,6 @@ async def admin_bank_payout_action(callback: CallbackQuery):
         ])
         await callback.message.reply(
             f"⚠️ <b>Kapitalbank OpenAPI xabari:</b>\n<code>{res_msg}</code>\n\n"
-            f"ℹ️ <i>Eslatma: Bank serveriga to'g'ridan-to'g'ri to'lov qilish uchun server IP-manzili bank tomonidan tasdiqlangan (oq ro'yxatda) bo'lishi va USB ePass kaliti talab qilinishi mumkin.</i>\n\n"
             f"👉 <b>Click yoki Payme orqali 1 ta bosishda to'lab, 'To'ladim' tugmasini bosing:</b>",
             reply_markup=fallback_kb
         )
@@ -2754,14 +2657,7 @@ async def admin_park_today_orders(message: Message) -> None:
 
     diag_text = ""
     if api_err:
-        if "403" in api_err:
-            diag_text = (
-                f"\n\n⚠️ <b>YANDEX API RUXSAT XATOSI (HTTP 403):</b>\n"
-                f"Sizning Yandex API kalitingizda <b>'Заказы'</b> bo'limi yoqilmagan!\n"
-                f"📌 <i>Tuzatish:</i> Yandex Dispetcherskaya > Настройки > API ga kiring va <b>'Заказы'</b> ga galochka qo'ying."
-            )
-        else:
-            diag_text = f"\n\n⚠️ <i>Yandex API xabari: <code>{api_err}</code></i>"
+        diag_text = f"\n\n⚠️ <i>Yandex API xabari: <code>{api_err}</code></i>"
 
     await message.answer(
         f"🚖 <b>Bugungi Butun Taksopark Bo'yicha Umumiy Buyurtmalar:</b>\n"
@@ -2920,7 +2816,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
 async def admin_list_drivers(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    wait_msg = await message.answer("⏳ <i>Haydovchilar ro'yxati va real vaqtdagi balanslar olinmoqda...</i>")
+    wait_msg = await message.answer("⏳ <i>Haydovchilar ro'yxati va balanslar olinmoqda...</i>")
 
     drivers = await db_get_all_registered_drivers()
     try:
@@ -3149,7 +3045,8 @@ async def daily_morning_reminder():
 async def yandex_auto_sync_scheduler():
     while True:
         try:
-            await asyncio.sleep(60)
+            # So'rovlar oralig'ini 3 daqiqaga oshiramiz (Yandex limitidan chiqmaslik uchun)
+            await asyncio.sleep(180)
             drivers, _ = await yandex_api.get_all_drivers(force_refresh=True)
             if drivers:
                 pending_yandex_ids = await db_get_pending_yandex_ids()
