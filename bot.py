@@ -104,14 +104,15 @@ YANDEX_CLIENT_ID = os.getenv("YANDEX_CLIENT_ID", "").strip()
 YANDEX_PARK_ID = os.getenv("YANDEX_PARK_ID", "").strip()
 YANDEX_FLEET_URL = "https://fleet-api.taxi.yandex.net"
 
-# Bank sozlamalari (Render Environment Variables)
+# Kapitalbank OpenAPI sozlamalari (Kapitalbank OpenAPI V2 spetsifikatsiyasi bo'yicha)
 KAPITAL_ACCOUNT = os.getenv("KAPITAL_ACCOUNT", "").strip()
 KAPITAL_COMPANY_NAME = os.getenv("KAPITAL_COMPANY_NAME", "").strip()
 KAPITAL_INN = os.getenv("KAPITAL_INN", "").strip()
 KAPITAL_LOGIN = os.getenv("KAPITAL_LOGIN", "").strip()
 KAPITAL_MFO = os.getenv("KAPITAL_MFO", "").strip()
 KAPITAL_PASSWORD = os.getenv("KAPITAL_PASSWORD", "").strip()
-KAPITAL_BASE_URL = os.getenv("KAPITAL_BASE_URL", "").strip() or "https://api-b2b.kapitalbank.uz"
+# Rasmiy qo'llanmadagi ishchi URL: https://m.bank24.uz:2713
+KAPITAL_BASE_URL = os.getenv("KAPITAL_BASE_URL", "").strip() or "https://m.bank24.uz:2713"
 
 MIN_WITHDRAWAL = int(os.getenv("MIN_WITHDRAWAL", "20000"))
 MIN_DEPOSIT = int(os.getenv("MIN_DEPOSIT", "20000"))
@@ -1189,10 +1190,16 @@ yandex_api = YandexFleetAPI(YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID)
 
 
 # ============================================================
-# 4.1. BANK API (KAPITALBANK REAL AVTO-TO'LOV)
+# 4.1. KAPITALBANK OPENAPI RASMIY INTEGRATSIYASI (m.bank24.uz)
 # ============================================================
 
-class BankPayoutAPI:
+class KapitalBankOpenAPI:
+    """
+    Kapitalbank OpenAPI V2 spetsifikatsiyasi bo'yicha integratsiya moduli:
+    URL: https://m.bank24.uz:2713 (Boevoy)
+    Avtorizatsiya: /Mobile.svc/APILogin (Basic auth)
+    To'lov: /Mobile.svc/SendPayment (dtype='97' - Plastik kartani to'ldirish)
+    """
     def __init__(self, login: str, password: str, account: str, mfo: str, inn: str, company: str, base_url: str):
         self.login = login.strip()
         self.password = password.strip()
@@ -1200,15 +1207,19 @@ class BankPayoutAPI:
         self.mfo = mfo.strip()
         self.inn = inn.strip()
         self.company = company.strip()
-        self.base_url = (base_url or "https://api-b2b.kapitalbank.uz").rstrip("/")
+        # Rasmiy qo'llanmadagi aniq manzil:
+        self.base_url = (base_url or "https://m.bank24.uz:2713").rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None
+        self._sid: Optional[str] = None
+        self._client_id: Optional[int] = None
 
     def is_configured(self) -> bool:
-        return bool(self.login and self.account)
+        return bool(self.login and self.password and self.account)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=15, connect=5)
+            # Bank portlari uchun SSL va timeout
+            timeout = aiohttp.ClientTimeout(total=20, connect=8)
             self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
@@ -1216,37 +1227,120 @@ class BankPayoutAPI:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def send_payout(self, card_number: str, amount_sum: int, withdrawal_id: int) -> Tuple[bool, str]:
-        if not self.is_configured():
-            return False, "Bank login yoki hisob raqami kiritilmagan!"
-        try:
-            session = await self._get_session()
-            headers = {
-                "Content-Type": "application/json",
-            }
-            if self.login and self.password:
-                auth_str = f"{self.login}:{self.password}"
-                headers["Authorization"] = f"Basic {base64.b64encode(auth_str.encode()).decode()}"
+    def _get_auth_header(self) -> str:
+        # Qo'llanma 4-bet: Agar internet-banking bo'lsa IB# prefiksi
+        user_str = self.login if self.login.startswith("IB#") else f"IB#{self.login}"
+        auth_bytes = f"{user_str}:{self.password}".encode("utf-8")
+        return f"Basic {base64.b64encode(auth_bytes).decode('utf-8')}"
 
-            payload = {
-                "account": self.account,
-                "mfo": self.mfo,
-                "inn": self.inn,
-                "card_number": re.sub(r"\D", "", card_number),
-                "amount": int(amount_sum),
-                "order_id": f"LCH_{withdrawal_id}_{int(time.time())}"
-            }
-            # Kapitalbank B2B to'lov endpointiga yuborish
-            async with session.post(f"{self.base_url}/api/v1/payout", json=payload, headers=headers) as resp:
+    async def login_api(self) -> Tuple[bool, str]:
+        if not self.is_configured():
+            return False, "Bank login yoki paroli kiritilmagan!"
+
+        url = f"{self.base_url}/Mobile.svc/APILogin"
+        session = await self._get_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": self._get_auth_header()
+        }
+
+        try:
+            async with session.post(url, json={}, headers=headers) as resp:
                 text = await resp.text()
-                if resp.status in (200, 201):
-                    return True, f"BANK-KB-{withdrawal_id}"
-                return False, f"Bank xatosi (HTTP {resp.status}): {text[:120]}"
+                if resp.status == 200:
+                    data = json.loads(text)
+                    err = data.get("error")
+                    if err:
+                        return False, f"Bank xatosi ({err.get('code')}): {err.get('message')}"
+
+                    res = data.get("result", {})
+                    self._sid = res.get("sid", "")
+                    clients = res.get("clients", [])
+                    if clients:
+                        self._client_id = clients[0].get("id")
+                    return True, "OK"
+                else:
+                    return False, f"Bank serveri javob bermadi (HTTP {resp.status}): {text[:100]}"
+        except Exception as e:
+            return False, f"Bank ulanish xatosi: {e}"
+
+    async def send_payout(self, card_number: str, amount_sum: int, withdrawal_id: int) -> Tuple[bool, str]:
+        """
+        Qo'llanma 11-13 betlar:
+        dtype = '97' (Пополнение ПК)
+        purpose = 'Lochin Taxi to'lovi {8600...}' (oxirida figurali qavsda to'liq karta)
+        amount = tiyinlarda (so'm * 100)
+        """
+        if not self.is_configured():
+            return False, "Bank rekvizitlari kiritilmagan"
+
+        # 1. Avval APILogin orqali SID olish
+        ok, login_err = await self.login_api()
+        if not ok and not self._sid:
+            # Agar login xato bersa (IP cheklovi yoki SMS talabi)
+            return False, login_err
+
+        clean_card = re.sub(r"\D", "", card_number)
+        amount_tiyin = int(amount_sum) * 100  # Bank tiyinda qabul qiladi
+        now_date_str = datetime.now(TASHKENT_TZ).strftime("%d.%m.%Y")
+        now_uniq_str = datetime.now(TASHKENT_TZ).strftime("%Y%m%d%H%M%S") + f"{withdrawal_id}{self.login[:4]}"
+
+        url = f"{self.base_url}/Mobile.svc/SendPayment"
+        session = await self._get_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": self._get_auth_header()
+        }
+
+        # Qo'llanma 13-betdagi karta to'ldirish formati
+        payload = {
+            "client_id": self._client_id or 0,
+            "sid": self._sid or "",
+            "payment": {
+                "document": {
+                    "num": str(withdrawal_id),
+                    "branch": self.mfo or "00974",
+                    "general_id": None,
+                    "uniq": now_uniq_str,
+                    "ddate": now_date_str,
+                    "mfo_dt": self.mfo or "00974",
+                    "acc_dt": self.account,
+                    "name_dt": self.company or "LOCHIN TAXI",
+                    "inn_dt": self.inn or "",
+                    "mfo_ct": self.mfo or "00974",
+                    "acc_ct": self.account,
+                    "name_ct": "Haydovchi kartasi",
+                    "inn_ct": "",
+                    "purpose": f"Lochin Taxi to'lovi #{withdrawal_id} {{{clean_card}}}",
+                    "purp_code": "00699",
+                    "amount": amount_tiyin,
+                    "dtype": "97",  # Plastik kartaga to'lov
+                    "state": 52,
+                    "dir": 1,
+                    "err": "",
+                    "err_msg": ""
+                },
+                "signs": []
+            }
+        }
+
+        try:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                text = await resp.text()
+                if resp.status == 200:
+                    data = json.loads(text)
+                    err = data.get("error")
+                    if err:
+                        return False, f"Bank xatosi: {err.get('message')}"
+                    res_val = data.get("result")
+                    return True, f"KAPITAL-KB-{withdrawal_id}"
+                else:
+                    return False, f"Bank xatosi (HTTP {resp.status}): {text[:120]}"
         except Exception as e:
             return False, f"Bank ulanish xatosi: {e}"
 
 
-bank_payout_api = BankPayoutAPI(
+bank_payout_api = KapitalBankOpenAPI(
     login=KAPITAL_LOGIN,
     password=KAPITAL_PASSWORD,
     account=KAPITAL_ACCOUNT,
@@ -2189,7 +2283,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         f"🚖 <b>Yandex Pro:</b> {y_status_txt}"
     )
 
-    # Siz aytgan aniq tugmalar
     adm_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🔵 Click / 🟢 Payme orqali to'lash", callback_data=f"adm_p2p_menu:{w_id}")
@@ -2246,7 +2339,7 @@ async def admin_p2p_choose_menu(callback: CallbackQuery):
         f"💳 <b>Ariza #{w_id} — To'lov xizmatini tanlang:</b>\n\n"
         f"💰 Summa: <b>{fmt_sum(amount)} so'm</b>\n"
         f"💳 Karta: <code>{card}</code>\n\n"
-        f"<i>Tugmani bosganingizda Click yoki Payme to'lov sahifasi to'ldirilgan holda ochiladi:</i>",
+        f"<i>Tugmani bosganingizda Click yoki Payme ilovasi to'ldirilgan holda ochiladi:</i>",
         reply_markup=p2p_kb
     )
     await callback.answer()
@@ -2272,7 +2365,7 @@ async def admin_bank_payout_action(callback: CallbackQuery):
     card = wd.get("card_number", "")
     net_amt = int(wd.get("net_amount", 0))
 
-    await callback.answer("Bankka to'lov so'rovi yuborilmoqda...", show_alert=False)
+    await callback.answer("Kapitalbankka to'lov so'rovi yuborilmoqda...", show_alert=False)
     success, res_msg = await bank_payout_api.send_payout(card, net_amt, w_id)
 
     if not success:
@@ -2287,8 +2380,9 @@ async def admin_bank_payout_action(callback: CallbackQuery):
             ]
         ])
         await callback.message.reply(
-            f"⚠️ <b>Bank serveriga to'lov so'rovi yuborilmadi yoki IP cheklovi mavjud:</b>\n<code>{res_msg}</code>\n\n"
-            f"👉 <b>Quyidagi Click yoki Payme orqali 1 ta bosishda to'lab, 'To'ladim' tugmasini bosing:</b>",
+            f"⚠️ <b>Kapitalbank OpenAPI xabari:</b>\n<code>{res_msg}</code>\n\n"
+            f"ℹ️ <i>Eslatma: Bank serveriga to'g'ridan-to'g'ri to'lov qilish uchun server IP-manzili bank tomonidan tasdiqlangan (oq ro'yxatda) bo'lishi va USB ePass kaliti talab qilinishi mumkin.</i>\n\n"
+            f"👉 <b>Click yoki Payme orqali 1 ta bosishda to'lab, 'To'ladim' tugmasini bosing:</b>",
             reply_markup=fallback_kb
         )
         return
