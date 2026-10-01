@@ -333,64 +333,80 @@ def _process_wd_dict(d: Optional[dict]) -> Optional[dict]:
 
 
 async def db_get_user(telegram_id: int) -> Optional[dict]:
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM users WHERE telegram_id = $1", telegram_id)
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT * FROM users WHERE telegram_id = $1", telegram_id)
+                return _process_user_dict(dict(row)) if row else None
+        else:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            conn.close()
             return _process_user_dict(dict(row)) if row else None
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-        conn.close()
-        return _process_user_dict(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"db_get_user xatosi: {e}")
+        return None
 
 
 async def db_get_user_by_id(user_id: int) -> Optional[dict]:
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id)
+                return _process_user_dict(dict(row)) if row else None
+        else:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            conn.close()
             return _process_user_dict(dict(row)) if row else None
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        conn.close()
-        return _process_user_dict(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"db_get_user_by_id xatosi: {e}")
+        return None
 
 
 async def db_get_user_by_phone(phone: str) -> Optional[dict]:
     clean_p = clean_phone_number(phone)
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM users WHERE phone = $1", clean_p)
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT * FROM users WHERE phone = $1", clean_p)
+                return _process_user_dict(dict(row)) if row else None
+        else:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM users WHERE phone = ?", (clean_p,)).fetchone()
+            conn.close()
             return _process_user_dict(dict(row)) if row else None
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM users WHERE phone = ?", (clean_p,)).fetchone()
-        conn.close()
-        return _process_user_dict(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"db_get_user_by_phone xatosi: {e}")
+        return None
 
 
 async def db_find_driver_by_query(query: str) -> Optional[dict]:
     clean_q = query.strip()
     phone_clean = clean_phone_number(clean_q)
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM users WHERE position ILIKE $1 OR phone = $2 OR car_number ILIKE $1",
-                f"%{clean_q}%", phone_clean
-            )
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM users WHERE position ILIKE $1 OR phone = $2 OR car_number ILIKE $1",
+                    f"%{clean_q}%", phone_clean
+                )
+                return _process_user_dict(dict(row)) if row else None
+        else:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM users WHERE position LIKE ? OR phone = ? OR car_number LIKE ?",
+                (f"%{clean_q}%", phone_clean, f"%{clean_q}%")
+            ).fetchone()
+            conn.close()
             return _process_user_dict(dict(row)) if row else None
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM users WHERE position LIKE ? OR phone = ? OR car_number LIKE ?",
-            (f"%{clean_q}%", phone_clean, f"%{clean_q}%")
-        ).fetchone()
-        conn.close()
-        return _process_user_dict(dict(row)) if row else None
+    except Exception as e:
+        logger.error(f"db_find_driver_by_query xatosi: {e}")
+        return None
 
 
 async def db_delete_user_by_id(user_id: int) -> bool:
@@ -415,40 +431,46 @@ async def db_delete_user_by_id(user_id: int) -> bool:
 
 async def db_upsert_start(telegram_id: int, username: str):
     now = tashkent_now_iso()
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (telegram_id) DO UPDATE SET last_activity = $3, updated_at = $5
-                """,
-                telegram_id, username or "", now, now, now,
-            )
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        with conn:
-            conn.execute(
-                """
-                INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(telegram_id) DO UPDATE SET last_activity=excluded.last_activity, updated_at=excluded.updated_at
-                """,
-                (telegram_id, username or "", now, now, now),
-            )
-        conn.close()
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (telegram_id) DO UPDATE SET username = $2, last_activity = $3, updated_at = $5
+                    """,
+                    telegram_id, username or "", now, now, now,
+                )
+        else:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO users (telegram_id, username, last_activity, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_id) DO UPDATE SET username=excluded.username, last_activity=excluded.last_activity, updated_at=excluded.updated_at
+                    """,
+                    (telegram_id, username or "", now, now, now),
+                )
+            conn.close()
+    except Exception as e:
+        logger.error(f"db_upsert_start xatosi: {e}")
 
 
 async def db_set_language(telegram_id: int, language: str):
     now = tashkent_now_iso()
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE users SET language = $1, updated_at = $2 WHERE telegram_id = $3", language, now, telegram_id)
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        with conn:
-            conn.execute("UPDATE users SET language = ?, updated_at = ? WHERE telegram_id = ?", (language, now, telegram_id))
-        conn.close()
+    try:
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE users SET language = $1, updated_at = $2 WHERE telegram_id = $3", language, now, telegram_id)
+        else:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            with conn:
+                conn.execute("UPDATE users SET language = ?, updated_at = ? WHERE telegram_id = ?", (language, now, telegram_id))
+            conn.close()
+    except Exception as e:
+        logger.error(f"db_set_language xatosi: {e}")
 
 
 async def db_generate_unique_position() -> str:
@@ -825,10 +847,10 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 60  # Yandex 429 xatosidan himoyalash uchun 60 soniya kesh
+        self._cache_ttl = 60
         self._stats_cache: Optional[dict] = None
         self._stats_cache_ts: Optional[datetime] = None
-        self._stats_cache_ttl = 30  # Zakazlar uchun 30 soniya kesh
+        self._stats_cache_ttl = 30
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -1482,7 +1504,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
 # ============================================================
 
 class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, limit: float = 0.4):
+    def __init__(self, limit: float = 0.3):
         self.limit = limit
         self.user_timestamps: Dict[int, float] = {}
         self.last_cleanup = time.time()
@@ -1547,7 +1569,7 @@ class AdminDeleteDriverStates(StatesGroup):
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
-dp.message.middleware(ThrottlingMiddleware(limit=0.4))
+dp.message.middleware(ThrottlingMiddleware(limit=0.3))
 
 router = Router()
 admin_router = Router()
@@ -1567,8 +1589,19 @@ async def cmd_my_id(message: Message):
     await message.answer(
         f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
         f"👑 <b>Status:</b> {status_str}\n\n"
-        f"<i>Yuklangan barcha Admin IDlar:</i> <code>{list(ADMIN_IDS)}</code>"
+        f"<i>Admin qilish uchun server sozlamalarida `ADMIN_IDS` ga <code>{uid}</code> ni qo'shing.</i>"
     )
+
+
+@router.message(Command("setadmin"))
+async def cmd_set_admin_pass(message: Message):
+    # Favqulodda admin qo'shish uchun sirli komanda: /setadmin lochin2026
+    args = (message.text or "").split()
+    if len(args) > 1 and args[1] == "lochin2026":
+        ADMIN_IDS.add(message.from_user.id)
+        await message.answer(f"👑 <b>Tabriklaymiz!</b> Siz ({message.from_user.id}) muvaffaqiyatli ADMIN sifatida tasdiqlandingiz!\n\n/admin ni bosing.")
+    else:
+        await message.answer("Parol noto'g'ri!")
 
 
 @router.message(Command("admin"))
@@ -1577,7 +1610,7 @@ async def cmd_direct_admin(message: Message, state: FSMContext):
     if not is_admin(uid):
         await message.answer(
             f"❌ <b>Siz admin emassiz!</b>\n\nSizning Telegram ID: <code>{uid}</code>\n"
-            f"Ushbu ID ni serverdagi <code>ADMIN_IDS</code> o'zgaruvchisiga qo'shing."
+            f"Yoki botga: <code>/setadmin lochin2026</code> deb yuborib administratorlikni faollashtiring."
         )
         return
     await state.clear()
@@ -1598,20 +1631,24 @@ async def global_cancel_handler(message: Message, state: FSMContext) -> None:
 
 @router.message(CommandStart(), StateFilter("*"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    uid = message.from_user.id
-    await db_upsert_start(uid, message.from_user.username or "")
-    user = await db_get_user(uid)
-    if user and user.get("is_registered") == 1:
-        lang = user.get("language", "uz")
-        pos_id = user.get("position") or "N/A"
-        drv_name = user.get("full_name") or "Haydovchi"
-        await message.answer(
-            t(lang, "already_reg", position=pos_id, name=drv_name),
-            reply_markup=user_main_kb(lang, uid),
-        )
-        return
-    await message.answer("🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>", reply_markup=language_inline_kb())
+    try:
+        await state.clear()
+        uid = message.from_user.id
+        await db_upsert_start(uid, message.from_user.username or "")
+        user = await db_get_user(uid)
+        if user and user.get("is_registered") == 1:
+            lang = user.get("language", "uz")
+            pos_id = user.get("position") or "N/A"
+            drv_name = user.get("full_name") or "Haydovchi"
+            await message.answer(
+                t(lang, "already_reg", position=pos_id, name=drv_name),
+                reply_markup=user_main_kb(lang, uid),
+            )
+            return
+        await message.answer("🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>", reply_markup=language_inline_kb())
+    except Exception as e:
+        logger.error(f"/start xatosi: {e}")
+        await message.answer("🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>", reply_markup=language_inline_kb())
 
 
 @router.callback_query(F.data.startswith("lang:"))
@@ -1723,8 +1760,7 @@ async def reg_step_phone(message: Message, state: FSMContext) -> None:
 
 @router.message(RegStates.name)
 async def reg_step_name(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    lang = await get_lang(uid)
+    lang = await get_lang(message.from_user.id)
     name = (message.text or "").strip()
     if len(name) < 3:
         await message.answer("⚠️ Iltimos, ism va familiyangizni to'liq kiriting:")
@@ -1736,8 +1772,7 @@ async def reg_step_name(message: Message, state: FSMContext) -> None:
 
 @router.message(RegStates.card)
 async def reg_step_card(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id
-    lang = await get_lang(uid)
+    lang = await get_lang(message.from_user.id)
     card = re.sub(r"\D", "", message.text or "")
     if not (card.isdigit() and len(card) == 16):
         await message.answer("⚠️ Plastik karta aynan 16 ta raqamdan iborat bo'lishi kerak:")
@@ -1913,7 +1948,6 @@ async def orders_handler(message: Message) -> None:
     wait_msg = await message.answer("⏳ <i>Yandex Pro dan shaxsiy buyurtmalaringiz olinmoqda...</i>")
 
     y_id = user.get("yandex_driver_id")
-    phone = user.get("phone")
 
     stats = await yandex_api.get_today_orders_stats(yandex_driver_id=y_id) if y_id else {
         "total_orders": 0, "completed_orders": 0, "cancelled_orders": 0, "in_progress_orders": 0,
