@@ -750,6 +750,67 @@ async def db_get_stats() -> dict:
     }
 
 
+async def db_get_all_pending_withdrawals() -> List[dict]:
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT w.*, u.full_name, u.phone, u.position 
+                FROM withdrawals w
+                JOIN users u ON w.user_id = u.id
+                WHERE w.status = 'pending'
+                ORDER BY w.id DESC
+            """)
+            return [_process_wd_dict(dict(r)) for r in rows]
+    else:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT w.*, u.full_name, u.phone, u.position 
+            FROM withdrawals w
+            JOIN users u ON w.user_id = u.id
+            WHERE w.status = 'pending'
+            ORDER BY w.id DESC
+        """).fetchall()
+        conn.close()
+        return [_process_wd_dict(dict(r)) for r in rows]
+
+
+async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
+    now = tashkent_now_iso()
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            if user_id:
+                res = await conn.execute(
+                    "UPDATE withdrawals SET status='completed', updated_at=$1 WHERE user_id=$2 AND status='pending'",
+                    now, user_id
+                )
+            else:
+                res = await conn.execute(
+                    "UPDATE withdrawals SET status='completed', updated_at=$1 WHERE status='pending'",
+                    now
+                )
+            try:
+                return int(res.replace("UPDATE ", "").strip())
+            except Exception:
+                return 1
+    else:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        with conn:
+            if user_id:
+                cur = conn.execute(
+                    "UPDATE withdrawals SET status='completed', updated_at=? WHERE user_id=? AND status='pending'",
+                    (now, user_id)
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE withdrawals SET status='completed', updated_at=? WHERE status='pending'",
+                    (now,)
+                )
+            count = cur.rowcount
+        conn.close()
+        return count
+
+
 # ============================================================
 # 4. YANDEX FLEET API (429-PROTECTED REAL-TIME ENGINE)
 # ============================================================
@@ -865,7 +926,6 @@ class YandexFleetAPI:
             return [], "Yandex API kalitlari .env da to'liq emas!"
 
         now = datetime.now()
-        # Kesh mavjud bo'lsa va muddati o'tmagan bo'lsa keshdan qaytarish (429 xatosini oldini oladi)
         if (not force_refresh and self._drivers_cache and self._cache_ts
                 and (now - self._cache_ts).total_seconds() < self._cache_ttl):
             return self._drivers_cache, ""
@@ -899,7 +959,7 @@ class YandexFleetAPI:
                     if len(batch) < limit:
                         break
                     offset += limit
-                    await asyncio.sleep(0.1)  # API limitni to'ldirmaslik uchun mikro-pauza
+                    await asyncio.sleep(0.1)
         except Exception as e:
             last_error = f"Ulanish xatosi: {str(e)}"
 
@@ -908,7 +968,6 @@ class YandexFleetAPI:
             self._cache_ts = now
             return all_drivers, ""
 
-        # Agar Yandex vaqtincha 429 bersa, eski kesh bo'lsa shuni qaytaramiz
         if self._drivers_cache:
             return self._drivers_cache, ""
 
@@ -934,11 +993,9 @@ class YandexFleetAPI:
         return None
 
     async def get_driver_balance(self, yandex_driver_id: Optional[str] = None, phone: Optional[str] = None) -> Optional[int]:
-        """Haydovchining real vaqtdagi balansini olish."""
         if not self._is_configured():
             return None
 
-        # 1. Tezkor to'g'ridan-to'g'ri so'rov
         if yandex_driver_id:
             url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
             payload = {
@@ -961,7 +1018,6 @@ class YandexFleetAPI:
             except Exception:
                 pass
 
-        # 2. Ro'yxatdan qidirish (keshlangan yoki yangilangan)
         drivers, _ = await self.get_all_drivers(force_refresh=False)
         clean_p = clean_phone_number(phone) if phone else ""
         digits_target = re.sub(r"\D", "", clean_p)[-9:] if clean_p else ""
@@ -977,9 +1033,7 @@ class YandexFleetAPI:
         return None
 
     async def get_today_orders_stats(self, yandex_driver_id: Optional[str] = None) -> dict:
-        """Bugungi qatnovlar va aylanmani Tranzaksiyalar orqali 100% aniq hisoblash."""
         now = datetime.now()
-        # Admin so'rovini 30 soniya keshlaymiz, bu 429 Limit Exceeded xatosini yo'qotadi
         if (not yandex_driver_id and self._stats_cache and self._stats_cache_ts
                 and (now - self._stats_cache_ts).total_seconds() < self._stats_cache_ttl):
             return self._stats_cache
@@ -996,11 +1050,9 @@ class YandexFleetAPI:
         now_tashkent = datetime.now(TASHKENT_TZ)
         today_start_tashkent = now_tashkent.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # UTC format
         from_utc = today_start_tashkent.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         to_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Hozirda ayni daqiqada zakazda yurgan haydovchilarni sanash
         active_on_order = 0
         drivers_list, _ = await self.get_all_drivers(force_refresh=False)
         for d_raw in drivers_list:
@@ -1011,7 +1063,6 @@ class YandexFleetAPI:
 
         session = await self._get_session()
 
-        # 1-METOD: YANDEX PRO TRANZAKSIYALARI ORQALI ANIQ QATNOVLAR VA SUMMALAR
         tx_url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/transactions/list"
         orders_dict = {}
         total_fare_sum = 0
@@ -1051,7 +1102,6 @@ class YandexFleetAPI:
                         except Exception:
                             amt = 0
 
-                        # Agar tranzaksiya buyurtma bilan bog'liq bo'lsa
                         if ord_id:
                             if ord_id not in orders_dict:
                                 orders_dict[ord_id] = {"cost": 0, "is_card": False}
@@ -1064,7 +1114,6 @@ class YandexFleetAPI:
         except Exception as e:
             tx_error = str(e)
 
-        # Tranzaksiyalardan hisoblash
         for o_info in orders_dict.values():
             c = o_info["cost"]
             total_fare_sum += c
@@ -1075,7 +1124,6 @@ class YandexFleetAPI:
 
         completed_count = len(orders_dict)
 
-        # 2-METOD: Agar tranzaksiyalarda hali tushum bo'lmasa, park buyurtmalari bilan ham tekshirish
         if completed_count == 0:
             try:
                 ord_url = f"{self.FLEET_BASE}/v1/parks/orders/list"
@@ -1418,12 +1466,13 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="📊 Statistika" if is_uz else "📊 Статистика"),
          KeyboardButton(text="🚖 Bugungi Park Zakazlari" if is_uz else "🚖 Заказы парка за сегодня")],
-        [KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет"),
-         KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация Яндекс")],
-        [KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка"),
-         KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители")],
-        [KeyboardButton(text="🗑 Haydovchini o'chirish" if is_uz else "🗑 Удалить водителя"),
-         KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные")],
+        [KeyboardButton(text="⏳ Kutilayotgan arizalar" if is_uz else "⏳ Заявки на вывод"),
+         KeyboardButton(text="📥 Excel Hisobot" if is_uz else "📥 Excel Отчет")],
+        [KeyboardButton(text="🔄 Yandex Sinxronlash" if is_uz else "🔄 Синхронизация Яндекс"),
+         KeyboardButton(text="📢 Xabar tarqatish" if is_uz else "📢 Рассылка")],
+        [KeyboardButton(text="👥 Haydovchilar" if is_uz else "👥 Водители"),
+         KeyboardButton(text="🗑 Haydovchini o'chirish" if is_uz else "🗑 Удалить водителя")],
+        [KeyboardButton(text="🚫 Nofaollar" if is_uz else "🚫 Неактивные")],
         [KeyboardButton(text="⬅️ Asosiy menyu" if is_uz else "⬅️ Главное меню")],
     ], resize_keyboard=True)
 
@@ -2393,6 +2442,69 @@ async def admin_open(message: Message, state: FSMContext) -> None:
     await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
 
 
+@admin_router.message(Command("clear_pending"))
+async def cmd_clear_pending(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()
+    if len(args) > 1:
+        query = args[1].strip()
+        driver = await db_find_driver_by_query(query)
+        if not driver:
+            await message.answer(f"❌ '{query}' bo'yicha haydovchi topilmadi.")
+            return
+        count = await db_force_complete_pending(user_id=driver["id"])
+        await message.answer(
+            f"✅ Haydovchi <b>{driver.get('full_name')}</b> ({driver.get('position')}) ning "
+            f"<b>{count} ta</b> qotib qolgan arizasi yopildi (tasdiqlandi). Endi u yangi pul yechish arizasi bera oladi!"
+        )
+    else:
+        count = await db_force_complete_pending()
+        await message.answer(f"✅ Barcha qotib qolgan <b>{count} ta</b> arizalar yopildi!")
+
+
+@admin_router.message(F.text.in_(["⏳ Kutilayotgan arizalar", "⏳ Заявки на вывод"]))
+async def admin_pending_withdrawals_list(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+
+    pending_list = await db_get_all_pending_withdrawals()
+    if not pending_list:
+        await message.answer("✅ Hozirda kutilayotgan (ochiq) arizalar mavjud emas.")
+        return
+
+    await message.answer(f"⏳ <b>Ko'rib chiqilishi kutilayotgan arizalar (Jami: {len(pending_list)} ta):</b>")
+
+    for wd in pending_list:
+        w_id = wd["id"]
+        u_name = wd.get("full_name", "Haydovchi")
+        u_pos = wd.get("position", "N/A")
+        u_phone = wd.get("phone", "")
+        amount = wd.get("amount", 0)
+        net_amount = wd.get("net_amount", 0)
+        card = wd.get("card_number", "")
+        created = str(wd.get("created_at", ""))[:19].replace("T", " ")
+
+        alert_text = (
+            f"💸 <b>Ariza #{w_id}</b> ({created})\n"
+            f"🆔 POSITION: <code>{u_pos}</code>\n"
+            f"👤 <b>Haydovchi:</b> {u_name}\n"
+            f"📱 <code>{u_phone}</code>\n"
+            f"💳 Karta: <code>{card}</code>\n"
+            f"💰 So'ralgan summa: {fmt_sum(amount)} so'm\n"
+            f"💵 <b>Kartaga to'lanishi kerak: {fmt_sum(net_amount)} so'm</b>"
+        )
+
+        adm_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ To'landi (Yopish)", callback_data=f"adm_pay:{w_id}"),
+                InlineKeyboardButton(text="❌ Rad etish (Qaytarish)", callback_data=f"adm_rej:{w_id}")
+            ]
+        ])
+        await message.answer(alert_text, reply_markup=adm_kb)
+
+
 @admin_router.message(F.text.in_(["🚖 Bugungi Park Zakazlari", "🚖 Заказы парка за сегодня"]))
 async def admin_park_today_orders(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -2618,7 +2730,6 @@ async def admin_list_drivers(message: Message) -> None:
 
         if y_info:
             live_bal = int(y_info["balance"])
-            # Holati: Zakazda yoki Bo'sh
             if y_info.get("is_on_order"):
                 st_icon = "🟢 Zakazda"
             elif y_info.get("work_status") == "working":
@@ -2849,7 +2960,6 @@ async def daily_morning_reminder():
 
 
 async def yandex_auto_sync_scheduler():
-    """Har 5 daqiqada (300 soniya) Yandex bilan sokin fon yangilash (429 bermaydi)."""
     while True:
         try:
             await asyncio.sleep(300)
