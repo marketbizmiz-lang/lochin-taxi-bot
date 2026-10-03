@@ -37,6 +37,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     BufferedInputFile,
     TelegramObject,
+    BotCommand,
+    BotCommandScopeDefault,
 )
 
 # ============================================================
@@ -843,7 +845,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (CHUQUR QIDIRUV VA TRANZAKSIYA)
+# 4. YANDEX FLEET API (REAL VAQT VA QIDIRUV ENGINE)
 # ============================================================
 
 class YandexFleetAPI:
@@ -856,7 +858,7 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 45
+        self._cache_ttl = 30  # Real vaqt uchun keshni 30 soniyaga qisqartirdik
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -932,7 +934,7 @@ class YandexFleetAPI:
             phones = [prof.get("phone")]
         phone = clean_phone_number(phones[0]) if phones else ""
 
-        # PINFL / Guvohnoma
+        # PINFL / TIN / License
         pinfl = ""
         for k in ("tin", "inn", "personal_tax_number", "id"):
             if prof.get(k):
@@ -959,7 +961,7 @@ class YandexFleetAPI:
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
         if not self._is_configured():
-            return [], "Yandex API kalitlari .env da to'liq emas!"
+            return [], "Yandex API sozlamalari (API_KEY / PARK_ID / CLIENT_ID) to'liq emas!"
 
         now = datetime.now()
         if (not force_refresh and self._drivers_cache and self._cache_ts
@@ -982,7 +984,7 @@ class YandexFleetAPI:
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
                     if resp.status == 429:
-                        last_error = "HTTP 429: Limit exceeded"
+                        last_error = "HTTP 429: Yandex so'rovlar limiti"
                         break
                     elif resp.status != 200:
                         last_error = f"HTTP {resp.status}: {text[:200]}"
@@ -994,7 +996,7 @@ class YandexFleetAPI:
                     if len(batch) < limit:
                         break
                     offset += limit
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.05)
         except Exception as e:
             last_error = f"Ulanish xatosi: {str(e)}"
 
@@ -1008,27 +1010,31 @@ class YandexFleetAPI:
 
         return [], last_error
 
-    async def find_driver_by_pinfl_or_query(self, query: str) -> Optional[dict]:
-        """Haydovchini JShShIR, Guvohnoma raqami yoki Telefon orqali Yandexdan topish"""
+    async def find_driver_by_pinfl_or_query(self, query: str) -> Tuple[Optional[dict], str]:
+        """Haydovchini JShShIR, Guvohnoma yoki Telefon orqali real vaqtda topish"""
         if not self._is_configured():
-            return None
+            return None, "Yandex API sozlanmagan"
+
         q_clean = str(query).strip()
         q_digits = re.sub(r"\D", "", q_clean)
-        drivers, _ = await self.get_all_drivers(force_refresh=True)
+        drivers, err = await self.get_all_drivers(force_refresh=True)
+
+        if not drivers and err:
+            return None, err
 
         for raw in drivers:
             raw_str = json.dumps(raw, ensure_ascii=False)
-            # 1. To'g'ridan-to'g'ri PINFL raqami qidiruv
+            # 1. 14 ta raqamli PINFL
             if q_digits and (q_digits in raw_str):
-                return self._normalize(raw)
-            # 2. Guvohnoma raqami (masalan UZAF4922493)
+                return self._normalize(raw), ""
+            # 2. Guvohnoma seriyasi (masalan UZAF4922493)
             if len(q_clean) >= 6 and (q_clean.lower() in raw_str.lower()):
-                return self._normalize(raw)
+                return self._normalize(raw), ""
             # 3. Telefon oxirgi 9 ta raqami
             if len(q_digits) >= 9 and (q_digits[-9:] in raw_str):
-                return self._normalize(raw)
+                return self._normalize(raw), ""
 
-        return None
+        return None, ""
 
     async def get_driver_balance(self, yandex_driver_id: Optional[str] = None, phone: Optional[str] = None) -> Optional[int]:
         if not self._is_configured():
@@ -1075,7 +1081,6 @@ class YandexFleetAPI:
         if not self._is_configured() or not yandex_driver_id:
             return False
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/transactions"
-        # Yandexda pul yechish doimo MANFIY (-) qilib yuboriladi:
         minus_amount = f"-{abs(int(amount))}.00"
         payload = {
             "park_id": self.park_id,
@@ -1437,11 +1442,11 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
 
 
 # ============================================================
-# 7. ANTI-FLOOD THROTTLING
+# 7. ANTI-FLOOD VA HAPTIC VIBRATSIYA MIDDLEWARE
 # ============================================================
 
 class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, limit: float = 0.3):
+    def __init__(self, limit: float = 0.25):
         self.limit = limit
         self.user_timestamps: Dict[int, float] = {}
         self.last_cleanup = time.time()
@@ -1458,6 +1463,13 @@ class ThrottlingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
+        # Haptic vibratsiya: har bir callback_query ga javob berish
+        if isinstance(event, CallbackQuery):
+            try:
+                await event.answer()
+            except Exception:
+                pass
+
         if isinstance(event, Message) and event.from_user:
             user_id = event.from_user.id
             now = time.time()
@@ -1507,13 +1519,30 @@ class AdminDeleteDriverStates(StatesGroup):
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
-dp.message.middleware(ThrottlingMiddleware(limit=0.3))
+dp.message.middleware(ThrottlingMiddleware(limit=0.25))
+dp.callback_query.middleware(ThrottlingMiddleware(limit=0.25))
 
 router = Router()
 admin_router = Router()
 
 BACK_TEXTS = {"⬅️ Orqaga", "⬅️ Назад", "orqaga", "назад", "/back"}
 CANCEL_TEXTS = {"❌ Bekor qilish", "❌ Отмена", "bekor", "отмена", "/bekor", "/cancel"}
+
+
+async def set_main_menu_commands(bot_instance: Bot):
+    """Didox-S kabi chap pastdagi ko'k [Menyu] tugmasini sozlash"""
+    commands = [
+        BotCommand(command="start", description="Qayta ishga tushirish / Перезапуск"),
+        BotCommand(command="menu", description="Asosiy menyu / Главное меню"),
+        BotCommand(command="balance", description="Balansni ko'rish / Баланс"),
+        BotCommand(command="withdraw", description="Pul yechish (24/7) / Вывод"),
+        BotCommand(command="cancel", description="Amaliyotni bekor qilish / Отмена"),
+        BotCommand(command="id", description="Mening Telegram ID / Мой ID"),
+    ]
+    try:
+        await bot_instance.set_my_commands(commands, scope=BotCommandScopeDefault())
+    except Exception as e:
+        logger.error(f"Menu commands o'rnatishda xatolik: {e}")
 
 
 async def get_lang(uid: int) -> str:
@@ -1528,7 +1557,7 @@ async def cmd_my_id(message: Message):
     await message.answer(
         f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
         f"👑 <b>Status:</b> {status_str}\n\n"
-        f"<i>Admin qilish uchun Render sozlamalarida `ADMIN_IDS` ga <code>{uid}</code> ni qo'shing.</i>"
+        f"<i>Admin qilish uchun sozlamalarda `ADMIN_IDS` ga <code>{uid}</code> ni qo'shing.</i>"
     )
 
 
@@ -1556,6 +1585,7 @@ async def cmd_direct_admin(message: Message, state: FSMContext):
     await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
 
 
+@router.message(Command("menu"), StateFilter("*"))
 @router.message(Command("cancel"), StateFilter("*"))
 @router.message(F.text.in_(CANCEL_TEXTS), StateFilter("*"))
 @router.message(F.text.in_(BACK_TEXTS), StateFilter("*"))
@@ -1609,11 +1639,10 @@ async def lang_callback(callback: CallbackQuery) -> None:
         )
     else:
         await callback.message.answer(t(lang, "welcome"), reply_markup=register_reply_kb(lang))
-    await callback.answer()
 
 
 # ============================================================
-# 10. JSHSHIR (PINFL) VA YANDEX PRO INTEGRATSIYASI
+# 10. JSHSHIR (PINFL) VA REAL VAQT INTEGRATSIYASI
 # ============================================================
 
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]), StateFilter("*"))
@@ -1641,19 +1670,22 @@ async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
     lang = await get_lang(uid)
     raw_query = (message.text or "").strip()
 
-    search_msg = await message.answer("⏳ <i>Yandex Pro bazasidan profilingiz qidirilmoqda...</i>")
-    y_driver = await yandex_api.find_driver_by_pinfl_or_query(raw_query)
+    search_msg = await message.answer("⏳ <i>Yandex Pro bazasidan profilingiz real vaqtda qidirilmoqda...</i>")
+    y_driver, y_err = await yandex_api.find_driver_by_pinfl_or_query(raw_query)
     try:
         await search_msg.delete()
     except Exception:
         pass
 
     if not y_driver:
+        err_extra = f"\n\n🔍 <i>Tizim xabari: {y_err}</i>" if y_err else ""
         await message.answer(
-            f"❌ <b>Ushbu JShShIR bo'yicha {BOT_NAME} taksoparkida haydovchi topilmadi!</b>\n\n"
-            f"📌 Siz avval taksoparkimizga Yandex Pro orqali biriktirilgan bo'lishingiz kerak.\n"
-            f"Menejer bilan bog'lanish: {SUPPORT_PHONE_DISPLAY}\n\n"
-            f"Yoki raqamni to'g'rilab qayta kiriting (JShShIR, Guvohnoma yoki Telefon):",
+            f"❌ <b>Ushbu ma'lumot bo'yicha {BOT_NAME} taksoparkida haydovchi topilmadi!</b>{err_extra}\n\n"
+            f"📌 <b>Quyidagilardan birini kiritib ko'ring:</b>\n"
+            f"1️⃣ 14 ta raqamli <b>JShShIR (PINFL)</b>\n"
+            f"2️⃣ Haydovchilik guvohnoma seriyasi (Masalan: <code>UZAF4922493</code>)\n"
+            f"3️⃣ Yandex Pro ga ulangan <b>Telefon raqamingiz</b> (Masalan: <code>913773200</code>)\n\n"
+            f"📞 Bog'lanish: {SUPPORT_PHONE_DISPLAY}",
             reply_markup=back_kb(lang)
         )
         return
@@ -1720,7 +1752,6 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
 
     await message.answer(t(lang, "reg_success", position=position), reply_markup=user_main_kb(lang, uid))
 
-    # Adminga yangi haydovchi haqida xabar
     admin_alert = (
         f"🆕 <b>YANGI HAYDOVCHI RO'YXATDAN O'TDI! (JShShIR)</b>\n\n"
         f"🆔 POSITION: <code>{position}</code>\n"
@@ -1761,7 +1792,6 @@ async def change_card_callback(callback: CallbackQuery, state: FSMContext) -> No
         "<i>Eski kartangiz o'rniga shu yangi karta saqlanadi.</i>",
         reply_markup=back_kb(lang)
     )
-    await callback.answer()
 
 
 @router.message(ChangeCardStates.new_card)
@@ -1785,6 +1815,7 @@ async def process_new_card(message: Message, state: FSMContext) -> None:
 # 12. BALANS (REAL VAQT VA DEPOZIT NAZORATI)
 # ============================================================
 
+@router.message(Command("balance"))
 @router.message(F.text.in_(["💰 Balans", "💰 Баланс"]))
 async def balance_handler(message: Message) -> None:
     uid = message.from_user.id
@@ -1844,6 +1875,21 @@ async def balance_handler(message: Message) -> None:
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"✅ <b>Kartaga yechish mumkin:</b> <b>{fmt_sum(avail)} so'm</b>\n\n"
         f"🚕 <b>Yandex Pro:</b> {y_status}"
+    ) if lang == "uz" else (
+        f"💰 <b>{BOT_NAME} — Личный Баланс (Реальное время):</b>\n"
+        f"🕒 <i>Обновлено: {time_str}</i>\n\n"
+        f"👤 <b>Водитель:</b> {u_name}\n"
+        f"🆔 <b>POSITION:</b> <code>{u_pos}</code>\n"
+        f"📱 <b>Телефон:</b> <code>{u_phone}</code>\n"
+        f"🚗 <b>Автомобиль:</b> {u_car}\n"
+        f"💳 <b>Карта:</b> <code>{u_card_masked}</code>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"💳 <b>Баланс Яндекс Про:</b> <b>{fmt_sum(cur_bal)} сум</b>\n"
+        f"🔒 <b>Неснижаемый остаток:</b> {fmt_sum(MIN_DEPOSIT)} сум\n"
+        f"💸 <b>Выведено за сегодня:</b> <b>{fmt_sum(today_withdrawn)} сум</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"✅ <b>Доступно к выводу:</b> <b>{fmt_sum(avail)} сум</b>\n\n"
+        f"🚕 <b>Яндекс Про:</b> {y_status}"
     )
     await message.answer(text, reply_markup=user_main_kb(lang, uid))
 
@@ -1903,6 +1949,7 @@ async def orders_handler(message: Message) -> None:
 # 14. PUL YECHISH (DEPOZIT SAQLANISHI BILAN)
 # ============================================================
 
+@router.message(Command("withdraw"))
 @router.message(F.text.in_(["💸 Pul yechish (24/7)", "💸 Вывод средств (24/7)"]), StateFilter("*"))
 async def withdraw_start(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -1999,7 +2046,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
     if action == "no":
         await state.clear()
         await callback.message.edit_text("❌ Pul yechish bekor qilindi.")
-        await callback.answer()
         return
 
     data = await state.get_data()
@@ -2013,7 +2059,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
     user = await db_get_user(uid)
     if not user:
         await callback.message.edit_text("❌ Foydalanuvchi topilmadi.")
-        await callback.answer()
         return
 
     try:
@@ -2024,7 +2069,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         )
     except ValueError as val_err:
         await callback.message.edit_text(f"❌ Xatolik: {val_err}")
-        await callback.answer("Amaliyot rad etildi!", show_alert=True)
         return
 
     masked_c = mask_card(full_card)
@@ -2035,7 +2079,6 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
         f"💳 Karta: <code>{masked_c}</code>\n\n"
         f"⏱ <i>Mablag' qisqa vaqt ichida kartangizga o'tkaziladi.</i>"
     )
-    await callback.answer()
 
     y_status_txt = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
     u_pos = user.get("position", "N/A")
@@ -2097,7 +2140,6 @@ async def admin_approve_payout(callback: CallbackQuery):
         await callback.answer("Haydovchi topilmadi!", show_alert=True)
         return
 
-    # 1. YANDEX BALANSIDAN AVTOMATIK MINUS QILISH:
     y_success = False
     if user.get("yandex_driver_id"):
         y_success = await yandex_api.create_transaction(
@@ -2217,13 +2259,11 @@ async def open_admin_panel_callback(callback: CallbackQuery, state: FSMContext) 
     await state.clear()
     lang = await get_lang(callback.from_user.id)
     await callback.message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
-    await callback.answer()
 
 
 @router.callback_query(F.data == "change_lang_menu")
 async def change_lang_menu_cb(callback: CallbackQuery) -> None:
     await callback.message.edit_text("🌐 Tilni tanlang / Выберите язык:", reply_markup=language_inline_kb())
-    await callback.answer()
 
 
 @router.message(F.text.in_(["🏆 TOP Haydovchilar", "🏆 ТОП Водителей"]))
@@ -2271,7 +2311,6 @@ async def sos_location_flow(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
     await callback.message.answer(t(lang, "sos_ask_loc"), reply_markup=back_kb(lang))
-    await callback.answer()
 
 
 @router.message(SOSStates.waiting_for_location, F.location)
@@ -2349,7 +2388,6 @@ async def sos_message_flow(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
     await callback.message.answer(t(lang, "sos_ask_msg"), reply_markup=back_kb(lang))
-    await callback.answer()
 
 
 @router.message(SOSStates.waiting_for_message)
@@ -3046,6 +3084,7 @@ async def main() -> None:
     dp.include_router(router)
 
     await start_web_server()
+    await set_main_menu_commands(bot)
 
     asyncio.create_task(yandex_auto_sync_scheduler())
     asyncio.create_task(daily_morning_reminder())
