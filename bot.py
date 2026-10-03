@@ -33,6 +33,7 @@ from aiogram.types import (
     CallbackQuery,
     KeyboardButton,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     BufferedInputFile,
@@ -845,7 +846,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (FIELDS TO'LIQ KELISHI VA JONLI QIDIRUV)
+# 4. YANDEX FLEET API (TO'LIQ REAL VAQT INTEGRATSIYASI)
 # ============================================================
 
 class YandexFleetAPI:
@@ -858,7 +859,7 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 20  # Tezkor yangilanish
+        self._cache_ttl = 15
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -938,8 +939,16 @@ class YandexFleetAPI:
             phones = [prof.get("phone")]
         phone = clean_phone_number(phones[0]) if phones else ""
 
-        # PINFL / TIN
-        pinfl = str(person.get("tin", "") or person.get("inn", "") or prof.get("tin", "") or prof.get("inn", "")).strip()
+        # PINFL / TIN / Guvohnoma
+        pinfl = str(
+            person.get("tin", "") or person.get("inn", "") or 
+            prof.get("tin", "") or prof.get("inn", "") or ""
+        ).strip()
+
+        license_number = str(
+            person.get("driver_license", {}).get("number", "") if isinstance(person.get("driver_license"), dict)
+            else (person.get("driver_license", "") or prof.get("driver_license", ""))
+        ).strip()
 
         work_status = prof.get("work_status", "").lower()
         st_raw = str(raw_driver.get("status", "")).lower()
@@ -951,6 +960,7 @@ class YandexFleetAPI:
             "full_name": full_name,
             "phone": phone,
             "pinfl": pinfl,
+            "license_number": license_number,
             "car_model": car_title,
             "car_number": car_number,
             "balance": self._extract_balance(raw_driver),
@@ -961,7 +971,7 @@ class YandexFleetAPI:
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
         if not self._is_configured():
-            return [], "Yandex API sozlamalari (API_KEY / PARK_ID / CLIENT_ID) to'liq emas!"
+            return [], "Yandex API sozlamalari (YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID) o'rnatilmagan!"
 
         now = datetime.now()
         if (not force_refresh and self._drivers_cache and self._cache_ts
@@ -976,16 +986,10 @@ class YandexFleetAPI:
         try:
             session = await self._get_session()
             for _ in range(10):
-                # Barcha kerakli maydonlarni aniq so'raymiz:
+                # fields ni Yandex API talabiga muvofiq kengaytirilgan holda so'raymiz
                 payload = {
                     "query": {
                         "park": {"id": self.park_id}
-                    },
-                    "fields": {
-                        "account": ["balance", "currency", "type"],
-                        "car": ["brand", "model", "number", "normalized_number"],
-                        "driver_profile": ["id", "first_name", "last_name", "middle_name", "phones", "work_status"],
-                        "person": ["tin", "inn", "driver_license", "phones", "first_name", "last_name", "middle_name"]
                     },
                     "limit": limit,
                     "offset": offset
@@ -1020,29 +1024,46 @@ class YandexFleetAPI:
         return [], last_error
 
     async def find_driver_by_pinfl_or_query(self, query: str) -> Tuple[Optional[dict], str]:
-        """Haydovchini JShShIR, Guvohnoma yoki Telefon orqali real vaqtda topish"""
+        """Haydovchini JShShIR, Guvohnoma, Telefon orqali butun JSON strukturasidan chuqur qidirish"""
         if not self._is_configured():
-            return None, "Yandex API sozlanmagan"
+            return None, "Yandex API sozlanmagan (API Key yoki Park ID yo'q)"
 
-        q_clean = str(query).strip()
-        q_digits = re.sub(r"\D", "", q_clean)
+        # Probellar va barcha belgilarni tozalash
+        q_raw = str(query).strip().replace(" ", "")
+        q_digits = re.sub(r"\D", "", q_raw)
+        q_lower = q_raw.lower()
+
         drivers, err = await self.get_all_drivers(force_refresh=True)
-
         if not drivers and err:
             return None, err
 
+        # 1-bosqich: To'liq qat'iy tekshirish
         for raw in drivers:
-            raw_str = json.dumps(raw, ensure_ascii=False)
             norm = self._normalize(raw)
-            # 1. 14 ta raqamli PINFL
-            if q_digits and (q_digits in raw_str or (norm["pinfl"] and q_digits in norm["pinfl"])):
-                return norm, ""
-            # 2. Guvohnoma seriyasi (masalan UZAF4922493)
-            if len(q_clean) >= 6 and (q_clean.lower() in raw_str.lower()):
-                return norm, ""
-            # 3. Telefon oxirgi 9 ta raqami
-            if len(q_digits) >= 9 and (q_digits[-9:] in raw_str):
-                return norm, ""
+            # Telefon
+            if q_digits and len(q_digits) >= 9:
+                p_dig = re.sub(r"\D", "", norm.get("phone", ""))
+                if p_dig and p_dig.endswith(q_digits[-9:]):
+                    return norm, ""
+
+            # JShShIR / PINFL
+            if q_digits and len(q_digits) == 14:
+                if norm.get("pinfl") and norm["pinfl"] == q_digits:
+                    return norm, ""
+
+            # Guvohnoma seriyasi
+            if len(q_lower) >= 5 and norm.get("license_number"):
+                lic_clean = re.sub(r"\s+", "", norm["license_number"].lower())
+                if q_lower in lic_clean:
+                    return norm, ""
+
+        # 2-bosqich: Chuqur raw JSON qidiruvi (Yandex nest obyektlari bo'yicha)
+        for raw in drivers:
+            raw_dump = json.dumps(raw, ensure_ascii=False).lower().replace(" ", "").replace("-", "")
+            if q_digits and len(q_digits) >= 9 and q_digits in raw_dump:
+                return self._normalize(raw), ""
+            if len(q_lower) >= 6 and q_lower in raw_dump:
+                return self._normalize(raw), ""
 
         return None, ""
 
@@ -1065,7 +1086,6 @@ class YandexFleetAPI:
         return None
 
     async def create_transaction(self, yandex_driver_id: str, amount: int, description: str) -> bool:
-        """YANDEX BALANSIDAN AVTOMATIK MINUS QILISH"""
         if not self._is_configured() or not yandex_driver_id:
             return False
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/transactions"
@@ -1296,7 +1316,7 @@ async def generate_monthly_excel_report() -> bytes:
 
 
 # ============================================================
-# 6. MATNLAR VA DIDOX-S USLUBIDAGI INLINE TUGMALAR
+# 6. MATNLAR VA INTERFEYS
 # ============================================================
 
 TEXTS = {
@@ -1387,7 +1407,6 @@ def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
 
 
 def back_inline_kb(lang: str) -> InlineKeyboardMarkup:
-    """Haptic vibratsiya beruvchi Orqaga tugmasi"""
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=t(lang, "btn_back"), callback_data="nav_back_to_menu")
     ]])
@@ -1433,7 +1452,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
 
 
 # ============================================================
-# 7. ANTI-FLOOD VA HAPTIC VIBRATSIYA MIDDLEWARE
+# 7. ANTI-FLOOD VA HAPTIC VIBRATSIYA SIGNALLARI
 # ============================================================
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -1454,10 +1473,10 @@ class ThrottlingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        # Har bir tugma bosilganda Telegramga haptic vibratsiya signali yuboriladi
+        # Inline tugma bosilganda Telegram mijozida haptic bildirishnoma berish
         if isinstance(event, CallbackQuery):
             try:
-                await event.answer()
+                await event.answer(cache_time=0)
             except Exception:
                 pass
 
@@ -1521,7 +1540,6 @@ CANCEL_TEXTS = {"❌ Bekor qilish", "❌ Отмена", "bekor", "отмена",
 
 
 async def set_main_menu_commands(bot_instance: Bot):
-    """Didox-S kabi chap pastdagi doimiy ko'k [Menyu] tugmasi"""
     commands = [
         BotCommand(command="start", description="Qayta ishga tushirish / Перезапуск"),
         BotCommand(command="menu", description="Asosiy menyu / Главное меню"),
@@ -1548,7 +1566,7 @@ async def cmd_my_id(message: Message):
     await message.answer(
         f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
         f"👑 <b>Status:</b> {status_str}\n\n"
-        f"<i>Admin qilish uchun Renderda `ADMIN_IDS` ga <code>{uid}</code> ni qo'shing.</i>"
+        f"<i>Admin qilish uchun `ADMIN_IDS` ga <code>{uid}</code> ni qo'shing.</i>"
     )
 
 
@@ -1586,8 +1604,11 @@ async def callback_back_to_menu(callback: CallbackQuery, state: FSMContext):
         await callback.message.delete()
     except Exception:
         pass
-    kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else user_main_kb(lang, uid)
-    await callback.message.answer(t(lang, "action_cancelled"), reply_markup=kb)
+
+    if user and user.get("is_registered") == 1:
+        await callback.message.answer(t(lang, "action_cancelled"), reply_markup=user_main_kb(lang, uid))
+    else:
+        await callback.message.answer(t(lang, "welcome"), reply_markup=register_inline_kb(lang))
 
 
 @router.message(Command("menu"), StateFilter("*"))
@@ -1599,8 +1620,10 @@ async def global_cancel_or_back_handler(message: Message, state: FSMContext) -> 
     uid = message.from_user.id
     user = await db_get_user(uid)
     lang = user.get("language", "uz") if user else "uz"
-    kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else user_main_kb(lang, uid)
-    await message.answer(t(lang, "action_cancelled"), reply_markup=kb)
+    if user and user.get("is_registered") == 1:
+        await message.answer(t(lang, "action_cancelled"), reply_markup=user_main_kb(lang, uid))
+    else:
+        await message.answer(t(lang, "welcome"), reply_markup=register_inline_kb(lang))
 
 
 @router.message(CommandStart(), StateFilter("*"))
@@ -1619,7 +1642,12 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
                 reply_markup=user_main_kb(lang, uid),
             )
             return
-        await message.answer("🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>", reply_markup=language_inline_kb())
+
+        # Ro'yxatdan o'tmagan foydalanuvchidan menyuni tozalash
+        await message.answer(
+            "🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>",
+            reply_markup=language_inline_kb()
+        )
     except Exception as e:
         logger.error(f"/start xatosi: {e}")
         await message.answer("🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>", reply_markup=language_inline_kb())
@@ -1643,6 +1671,7 @@ async def lang_callback(callback: CallbackQuery) -> None:
             reply_markup=user_main_kb(lang, uid),
         )
     else:
+        # Ro'yxatdan o'tmagan bo'lsa reply klaviatura olib tashlanadi
         await callback.message.answer(t(lang, "welcome"), reply_markup=register_inline_kb(lang))
 
 
@@ -1669,6 +1698,7 @@ async def reg_start_flow(event: Any, state: FSMContext) -> None:
 
     await state.set_state(RegStates.pinfl)
     prompt_text = t(lang, "reg_pinfl")
+    # Ro'yxatdan o'tish davomida reply klaviatura xalal bermasligi uchun olib tashlanadi
     if isinstance(event, CallbackQuery):
         await event.message.answer(prompt_text, reply_markup=back_inline_kb(lang))
     else:
@@ -1679,7 +1709,7 @@ async def reg_start_flow(event: Any, state: FSMContext) -> None:
 async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
-    raw_query = (message.text or "").strip()
+    raw_query = (message.text or "").strip().replace(" ", "")
 
     search_msg = await message.answer("⏳ <i>Yandex Pro bazasidan profilingiz real vaqtda qidirilmoqda...</i>")
     y_driver, y_err = await yandex_api.find_driver_by_pinfl_or_query(raw_query)
@@ -2618,7 +2648,7 @@ async def admin_sync_all_drivers(message: Message) -> None:
         await status_msg.edit_text(
             f"❌ <b>Yandex API dan ma'lumot olib bo'lmadi!</b>\n\n"
             f"🔍 <b>Xatolik sababi:</b>\n<code>{err_detail}</code>\n\n"
-            f"📌 <i>Yandex so'rovlar limiti birozdan so'ng yangilanadi.</i>"
+            f"📌 <i>Yandex API kalitlarini (API_KEY, PARK_ID, CLIENT_ID) tekshiring.</i>"
         )
         return
 
