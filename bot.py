@@ -387,6 +387,7 @@ async def db_find_driver_by_query(query: str) -> Optional[dict]:
     clean_q = query.strip()
     digits_q = re.sub(r"\D", "", clean_q)
     phone_clean = clean_phone_number(clean_q)
+    target_dig = digits_q[-9:] if len(digits_q) >= 9 else "___"
     try:
         if db_pool:
             async with db_pool.acquire() as conn:
@@ -394,13 +395,12 @@ async def db_find_driver_by_query(query: str) -> Optional[dict]:
                     """SELECT * FROM users WHERE 
                        position ILIKE $1 OR phone = $2 OR car_number ILIKE $1 
                        OR pinfl = $3 OR (LENGTH($4) >= 9 AND phone ILIKE '%' || $4)""",
-                    f"%{clean_q}%", phone_clean, clean_q, digits_q[-9:] if len(digits_q) >= 9 else "___"
+                    f"%{clean_q}%", phone_clean, clean_q, target_dig
                 )
                 return _process_user_dict(dict(row)) if row else None
         else:
             conn = sqlite3.connect(DB_PATH, timeout=10)
             conn.row_factory = sqlite3.Row
-            target_dig = digits_q[-9:] if len(digits_q) >= 9 else "___"
             row = conn.execute(
                 """SELECT * FROM users WHERE 
                    position LIKE ? OR phone = ? OR car_number LIKE ? 
@@ -795,7 +795,7 @@ async def db_get_all_pending_withdrawals() -> List[dict]:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (TELEFON VA BARCHA MAYDONLAR BO'YICHA)
+# 4. YANDEX FLEET API
 # ============================================================
 
 class YandexFleetAPI:
@@ -971,7 +971,6 @@ class YandexFleetAPI:
         return [], last_error
 
     async def find_driver_by_query(self, query: str) -> Tuple[Optional[dict], str]:
-        """Avval telefon, keyin JShShIR, Guvohnoma va ichki baza bo'yicha qidirish"""
         q_raw = str(query).strip()
         q_digits = re.sub(r"\D", "", q_raw)
         q_clean = q_raw.lower().replace(" ", "").replace("-", "")
@@ -979,7 +978,6 @@ class YandexFleetAPI:
         # 1. Ichki ma'lumotlar bazasidan qidirish (Eski ro'yxatdan o'tganlar uchun)
         db_driver = await db_find_driver_by_query(q_raw)
         if db_driver and db_driver.get("yandex_driver_id"):
-            # Yandexdan joriy balansini olib to'ldiramiz
             live_bal = await self.get_driver_balance(db_driver["yandex_driver_id"], phone=db_driver.get("phone"))
             return {
                 "id": db_driver["yandex_driver_id"],
@@ -1570,12 +1568,13 @@ async def cmd_test_yandex_api(message: Message, state: FSMContext):
     drivers, err = await yandex_api.get_all_drivers(force_refresh=True)
 
     status_icon = "✅" if drivers else "❌"
+    api_masked = YANDEX_API_KEY[:6] + "..." if len(YANDEX_API_KEY) > 6 else YANDEX_API_KEY
     text = (
         f"📡 <b>Yandex Fleet API Diagnostikasi:</b>\n\n"
-        f"🔑 API Key: <code>{YANDEX_API_KEY[:6]}...{YANDEX_API_KEY[-4:] if len(YANDEX_API_KEY) > 10 else ''}</code>\n"
+        f"🔑 API Key: <code>{api_masked}</code>\n"
         f"🏢 Park ID: <code>{YANDEX_PARK_ID}</code>\n"
         f"👤 Client ID: <code>{YANDEX_CLIENT_ID}</code>\n\n"
-        f"{status_icon} <b>Holat:</b> {'Muvaffaqiyatli ulangan' if drivers else 'Ulanib bo'lmadi'}\n"
+        f"{status_icon} <b>Holat:</b> " + ("Muvaffaqiyatli ulangan\n" if drivers else "Ulanib bo'lmadi\n") +
         f"👥 <b>Topilgan haydovchilar soni:</b> <b>{len(drivers)} ta</b>\n"
     )
     if err:
@@ -2215,7 +2214,7 @@ async def withdraw_process_callback(callback: CallbackQuery, state: FSMContext) 
 
 
 # ============================================================
-# 15. ADMIN TASDIQLASH (YANDEX BALANSIDAN AVTOMATIK MINUS QILISH)
+# 15. ADMIN TASDIQLASH
 # ============================================================
 
 @admin_router.callback_query(F.data.startswith("adm_pay:"), StateFilter("*"))
