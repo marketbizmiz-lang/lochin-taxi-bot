@@ -564,28 +564,6 @@ async def db_has_pending_withdrawal(user_id: int) -> bool:
         return bool(row)
 
 
-async def db_get_pending_yandex_ids() -> Set[str]:
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT DISTINCT u.yandex_driver_id 
-                FROM users u 
-                INNER JOIN withdrawals w ON u.id = w.user_id 
-                WHERE w.status = 'pending' AND u.yandex_driver_id IS NOT NULL AND u.yandex_driver_id != ''
-            """)
-            return {r["yandex_driver_id"] for r in rows if r["yandex_driver_id"]}
-    else:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
-        rows = conn.execute("""
-            SELECT DISTINCT u.yandex_driver_id 
-            FROM users u 
-            INNER JOIN withdrawals w ON u.id = w.user_id 
-            WHERE w.status = 'pending' AND u.yandex_driver_id IS NOT NULL AND u.yandex_driver_id != ''
-        """).fetchall()
-        conn.close()
-        return {r[0] for r in rows if r[0]}
-
-
 async def db_create_withdrawal(
     user_id: int, telegram_id: int, amount: int, commission: int,
     net_amount: int, card_number: str, status: str, payout_method: str, ext_tx_id: str = "",
@@ -846,7 +824,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (TO'LIQ REAL VAQT INTEGRATSIYASI)
+# 4. YANDEX FLEET API (TELEFON ORQALI ANIQ QIDIRUV)
 # ============================================================
 
 class YandexFleetAPI:
@@ -861,8 +839,14 @@ class YandexFleetAPI:
         self._cache_ts: Optional[datetime] = None
         self._cache_ttl = 15
 
-    def _is_configured(self) -> bool:
-        return bool(self.api_key and self.park_id and self.client_id)
+    def _is_configured(self) -> Tuple[bool, str]:
+        if not self.api_key:
+            return False, "YANDEX_API_KEY o'rnatilmagan!"
+        if not self.park_id:
+            return False, "YANDEX_PARK_ID o'rnatilmagan!"
+        if not self.client_id:
+            return False, "YANDEX_CLIENT_ID o'rnatilmagan!"
+        return True, ""
 
     @property
     def _headers(self) -> dict:
@@ -939,12 +923,7 @@ class YandexFleetAPI:
             phones = [prof.get("phone")]
         phone = clean_phone_number(phones[0]) if phones else ""
 
-        # PINFL / TIN / Guvohnoma
-        pinfl = str(
-            person.get("tin", "") or person.get("inn", "") or 
-            prof.get("tin", "") or prof.get("inn", "") or ""
-        ).strip()
-
+        pinfl = str(person.get("tin", "") or person.get("inn", "") or prof.get("tin", "") or prof.get("inn", "") or "").strip()
         license_number = str(
             person.get("driver_license", {}).get("number", "") if isinstance(person.get("driver_license"), dict)
             else (person.get("driver_license", "") or prof.get("driver_license", ""))
@@ -970,8 +949,9 @@ class YandexFleetAPI:
         }
 
     async def get_all_drivers(self, force_refresh: bool = False) -> Tuple[List[dict], str]:
-        if not self._is_configured():
-            return [], "Yandex API sozlamalari (YANDEX_API_KEY, YANDEX_CLIENT_ID, YANDEX_PARK_ID) o'rnatilmagan!"
+        is_ok, cfg_err = self._is_configured()
+        if not is_ok:
+            return [], cfg_err
 
         now = datetime.now()
         if (not force_refresh and self._drivers_cache and self._cache_ts
@@ -986,7 +966,6 @@ class YandexFleetAPI:
         try:
             session = await self._get_session()
             for _ in range(10):
-                # fields ni Yandex API talabiga muvofiq kengaytirilgan holda so'raymiz
                 payload = {
                     "query": {
                         "park": {"id": self.park_id}
@@ -996,7 +975,13 @@ class YandexFleetAPI:
                 }
                 async with session.post(url, json=payload) as resp:
                     text = await resp.text()
-                    if resp.status == 429:
+                    if resp.status == 401:
+                        last_error = "HTTP 401 Unauthorized: YANDEX_API_KEY yoki CLIENT_ID noto'g'ri!"
+                        break
+                    elif resp.status == 403:
+                        last_error = "HTTP 403 Forbidden: API kalitida ushbu park uchun huquq yo'q!"
+                        break
+                    elif resp.status == 429:
                         last_error = "HTTP 429: Yandex so'rovlar limiti"
                         break
                     elif resp.status != 200:
@@ -1024,51 +1009,48 @@ class YandexFleetAPI:
         return [], last_error
 
     async def find_driver_by_pinfl_or_query(self, query: str) -> Tuple[Optional[dict], str]:
-        """Haydovchini JShShIR, Guvohnoma, Telefon orqali butun JSON strukturasidan chuqur qidirish"""
-        if not self._is_configured():
-            return None, "Yandex API sozlanmagan (API Key yoki Park ID yo'q)"
-
-        # Probellar va barcha belgilarni tozalash
-        q_raw = str(query).strip().replace(" ", "")
+        q_raw = str(query).strip()
         q_digits = re.sub(r"\D", "", q_raw)
-        q_lower = q_raw.lower()
+        q_clean = q_raw.lower().replace(" ", "").replace("-", "")
 
         drivers, err = await self.get_all_drivers(force_refresh=True)
-        if not drivers and err:
-            return None, err
+        if not drivers:
+            return None, err or "Taksoparkda haydovchilar mavjud emas"
 
-        # 1-bosqich: To'liq qat'iy tekshirish
+        # 1 - Telefon bo'yicha - ENG ANIQ VA ASOSIY USUL
+        if len(q_digits) >= 9:
+            target = q_digits[-9:]
+            for raw in drivers:
+                norm = self._normalize(raw)
+                phone_digits = re.sub(r"\D", "", norm.get("phone", ""))
+                if phone_digits and phone_digits[-9:] == target:
+                    return norm, ""
+
+        # 2 - JShShIR 14 ta raqam bo'lsa, chuqur qidiruv
+        if len(q_digits) == 14:
+            for raw in drivers:
+                flat = json.dumps(raw, ensure_ascii=False).lower()
+                if q_digits in re.sub(r"\D", "", flat):
+                    return self._normalize(raw), ""
+
+        # 3 - Guvohnoma seriyasi (masalan UZAF4922493)
+        if len(q_clean) >= 5:
+            for raw in drivers:
+                norm = self._normalize(raw)
+                if q_clean in norm.get("license_number", "").lower().replace(" ", ""):
+                    return norm, ""
+
+        # 4 - Oxirgi chora - barcha qiymatlar ichidan qidirish
         for raw in drivers:
-            norm = self._normalize(raw)
-            # Telefon
-            if q_digits and len(q_digits) >= 9:
-                p_dig = re.sub(r"\D", "", norm.get("phone", ""))
-                if p_dig and p_dig.endswith(q_digits[-9:]):
-                    return norm, ""
-
-            # JShShIR / PINFL
-            if q_digits and len(q_digits) == 14:
-                if norm.get("pinfl") and norm["pinfl"] == q_digits:
-                    return norm, ""
-
-            # Guvohnoma seriyasi
-            if len(q_lower) >= 5 and norm.get("license_number"):
-                lic_clean = re.sub(r"\s+", "", norm["license_number"].lower())
-                if q_lower in lic_clean:
-                    return norm, ""
-
-        # 2-bosqich: Chuqur raw JSON qidiruvi (Yandex nest obyektlari bo'yicha)
-        for raw in drivers:
-            raw_dump = json.dumps(raw, ensure_ascii=False).lower().replace(" ", "").replace("-", "")
-            if q_digits and len(q_digits) >= 9 and q_digits in raw_dump:
-                return self._normalize(raw), ""
-            if len(q_lower) >= 6 and q_lower in raw_dump:
+            all_vals = str(raw).lower().replace(" ", "").replace("-", "")
+            if q_clean in all_vals:
                 return self._normalize(raw), ""
 
         return None, ""
 
     async def get_driver_balance(self, yandex_driver_id: Optional[str] = None, phone: Optional[str] = None) -> Optional[int]:
-        if not self._is_configured():
+        is_ok, _ = self._is_configured()
+        if not is_ok:
             return None
 
         drivers, _ = await self.get_all_drivers(force_refresh=False)
@@ -1086,7 +1068,8 @@ class YandexFleetAPI:
         return None
 
     async def create_transaction(self, yandex_driver_id: str, amount: int, description: str) -> bool:
-        if not self._is_configured() or not yandex_driver_id:
+        is_ok, _ = self._is_configured()
+        if not is_ok or not yandex_driver_id:
             return False
         url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/transactions"
         minus_amount = f"-{abs(int(amount))}.00"
@@ -1115,7 +1098,8 @@ class YandexFleetAPI:
             "in_progress_orders": 0, "total_earnings": 0, "cash_earnings": 0,
             "card_earnings": 0, "park_comm": 0, "api_error": ""
         }
-        if not self._is_configured():
+        is_ok, _ = self._is_configured()
+        if not is_ok:
             return default_res
 
         now_tashkent = datetime.now(TASHKENT_TZ)
@@ -1323,10 +1307,15 @@ TEXTS = {
     "uz": {
         "welcome": f"🕌 <b>Assalomu alaykum!</b>\n\n🚕 <b>{BOT_NAME}</b> taksoparkiga xush kelibsiz! Biz bilan daromadingizni oshiring! 🤝\n\nTizimdan to'liq foydalanish uchun ro'yxatdan o'ting:",
         "register_btn": "📝 Ro'yxatdan o'tish",
+        "reg_phone": (
+            "📱 <b>Yandex Pro ga ulangan telefon raqamingizni yuboring:</b>\n\n"
+            "<i>Pastdagi '📱 Raqamni yuborish' tugmasini bosing yoki raqamingizni yozing:</i>\n\n"
+            "Misol: <code>913773200</code> yoki <code>+998913773200</code>"
+        ),
         "reg_pinfl": (
             "🪪 <b>JShShIR (ПИНФЛ) raqamingizni kiriting:</b>\n\n"
             "<i>Haydovchilik guvohnomangizning <b>4d</b> bandidagi (yoki Pasport/ID-kartangizdagi) <b>14 ta raqam</b>ni kiriting:</i>\n\n"
-            "Misol: <code>31234567890123</code>"
+            "Misol: <code>30508853460039</code>"
         ),
         "reg_card": "💳 <b>Plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n<i>Misol: 8600 1234 5678 9012 yoki 9860...</i>",
         "reg_success": "✅ <b>Tabriklaymiz! Siz muvaffaqiyatli ro'yxatdan o'tdingiz.</b>\n\n🆔 Sizning POSITION ID: <code>{position}</code>\n🔑 Bu kod sizning taksoparkdagi shaxsiy kodingiz.",
@@ -1356,11 +1345,8 @@ TEXTS = {
     "ru": {
         "welcome": f"🕌 <b>Ассаламу алейкум!</b>\n\n🚕 Добро пожаловать в таксопарк <b>{BOT_NAME}</b>! Увеличьте свой доход с нами! 🤝\n\nПройдите регистрацию:",
         "register_btn": "📝 Регистрация",
-        "reg_pinfl": (
-            "🪪 <b>Введите ПИНФЛ (ЖШШИР):</b>\n\n"
-            "<i>Введите 14 цифр из пункта <b>4d</b> вашего водительского удостоверения или паспорта:</i>\n\n"
-            "Пример: <code>31234567890123</code>"
-        ),
+        "reg_phone": "📱 <b>Отправьте номер телефона, привязанный к Яндекс Про:</b>\n\n<i>Пример: 913773200 или +998913773200</i>",
+        "reg_pinfl": "🪪 <b>Введите ПИНФЛ (ЖШШИР, 14 цифр):</b>",
         "reg_card": "💳 <b>Введите 16-значный номер карты:</b>\n\n<i>Пример: 8600 1234 5678 9012</i>",
         "reg_success": "✅ <b>Вы успешно зарегистрированы.</b>\n\n🆔 Ваш POSITION ID: <code>{position}</code>",
         "already_reg": "✅ <b>Вы уже зарегистрированы!</b>\n\n🆔 POSITION: <code>{position}</code>\n👤 Водитель: <b>{name}</b>",
@@ -1404,6 +1390,19 @@ def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
     if is_admin(uid):
         buttons.append([KeyboardButton(text=t(lang, "menu_admin"))])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+
+def phone_share_kb(lang: str) -> ReplyKeyboardMarkup:
+    txt = "📱 Telefon raqamni yuborish" if lang == "uz" else "📱 Отправить номер телефона"
+    back_txt = "⬅️ Orqaga" if lang == "uz" else "⬅️ Назад"
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=txt, request_contact=True)],
+            [KeyboardButton(text=back_txt)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
 
 
 def back_inline_kb(lang: str) -> InlineKeyboardMarkup:
@@ -1473,7 +1472,6 @@ class ThrottlingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        # Inline tugma bosilganda Telegram mijozida haptic bildirishnoma berish
         if isinstance(event, CallbackQuery):
             try:
                 await event.answer(cache_time=0)
@@ -1493,12 +1491,13 @@ class ThrottlingMiddleware(BaseMiddleware):
 
 
 # ============================================================
-# 8. FSM STATES
+# 8. FSM STATES (AVVAL TELEFON -> KEYIN JSHSHIR -> KARTA)
 # ============================================================
 
 class RegStates(StatesGroup):
-    pinfl = State()
-    card = State()
+    phone = State()  # 1. Avval telefon orqali Yandexdan topiladi
+    pinfl = State()  # 2. Keyin JShShIR olinadi
+    card = State()   # 3. Plastik karta olinadi
 
 
 class ChangeCardStates(StatesGroup):
@@ -1580,6 +1579,32 @@ async def cmd_set_admin_pass(message: Message):
         await message.answer("Parol noto'g'ri!")
 
 
+@router.message(Command("yandex_test"))
+async def cmd_test_yandex_api(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    msg = await message.answer("⏳ <i>Yandex API tekshirilmoqda...</i>")
+    drivers, err = await yandex_api.get_all_drivers(force_refresh=True)
+
+    status_icon = "✅" if drivers else "❌"
+    text = (
+        f"📡 <b>Yandex Fleet API Diagnostikasi:</b>\n\n"
+        f"🔑 API Key: <code>{YANDEX_API_KEY[:6]}...{YANDEX_API_KEY[-4:] if len(YANDEX_API_KEY) > 10 else ''}</code>\n"
+        f"🏢 Park ID: <code>{YANDEX_PARK_ID}</code>\n"
+        f"👤 Client ID: <code>{YANDEX_CLIENT_ID}</code>\n\n"
+        f"{status_icon} <b>Holat:</b> {'Muvaffaqiyatli ulangan' if drivers else 'Ulanib bo'lmadi'}\n"
+        f"👥 <b>Topilgan haydovchilar soni:</b> <b>{len(drivers)} ta</b>\n"
+    )
+    if err:
+        text += f"\n⚠️ <b>Xatolik:</b>\n<code>{err}</code>"
+    elif drivers:
+        sample = drivers[0]
+        norm = yandex_api._normalize(sample)
+        text += f"\n🔍 <b>1-haydovchi namunasi:</b>\n👤 {norm['full_name']}\n📱 {norm['phone']}\n🚗 {norm['car_model']} ({norm['car_number']})\n💰 Balans: {norm['balance']}"
+
+    await msg.edit_text(text)
+
+
 @router.message(Command("admin"))
 async def cmd_direct_admin(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -1623,7 +1648,8 @@ async def global_cancel_or_back_handler(message: Message, state: FSMContext) -> 
     if user and user.get("is_registered") == 1:
         await message.answer(t(lang, "action_cancelled"), reply_markup=user_main_kb(lang, uid))
     else:
-        await message.answer(t(lang, "welcome"), reply_markup=register_inline_kb(lang))
+        await message.answer(t(lang, "welcome"), reply_markup=ReplyKeyboardRemove())
+        await message.answer("Ro'yxatdan o'tish uchun quyidagi tugmani bosing:", reply_markup=register_inline_kb(lang))
 
 
 @router.message(CommandStart(), StateFilter("*"))
@@ -1643,9 +1669,13 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             )
             return
 
-        # Ro'yxatdan o'tmagan foydalanuvchidan menyuni tozalash
+        # Ro'yxatdan o'tmaganlarda reply klaviatura majburiy tozalanadi
         await message.answer(
             "🌐 <b>Iltimos, tilni tanlang / Пожалуйста, выберите язык:</b>",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await message.answer(
+            "Tilni tanlang:",
             reply_markup=language_inline_kb()
         )
     except Exception as e:
@@ -1671,12 +1701,11 @@ async def lang_callback(callback: CallbackQuery) -> None:
             reply_markup=user_main_kb(lang, uid),
         )
     else:
-        # Ro'yxatdan o'tmagan bo'lsa reply klaviatura olib tashlanadi
         await callback.message.answer(t(lang, "welcome"), reply_markup=register_inline_kb(lang))
 
 
 # ============================================================
-# 10. JSHSHIR (PINFL) VA REAL VAQT INTEGRATSIYASI
+# 10. RO'YXATDAN O'TISH (TELEFON -> JSHSHIR -> KARTA)
 # ============================================================
 
 @router.callback_query(F.data == "start_reg_flow", StateFilter("*"))
@@ -1696,23 +1725,39 @@ async def reg_start_flow(event: Any, state: FSMContext) -> None:
             await event.answer(msg_text, reply_markup=user_main_kb(lang, uid))
         return
 
-    await state.set_state(RegStates.pinfl)
-    prompt_text = t(lang, "reg_pinfl")
-    # Ro'yxatdan o'tish davomida reply klaviatura xalal bermasligi uchun olib tashlanadi
+    # 1-qadam: TELEFON SO'RASH
+    await state.set_state(RegStates.phone)
+    prompt_text = t(lang, "reg_phone")
     if isinstance(event, CallbackQuery):
-        await event.message.answer(prompt_text, reply_markup=back_inline_kb(lang))
+        await event.message.answer(prompt_text, reply_markup=phone_share_kb(lang))
     else:
-        await event.answer(prompt_text, reply_markup=back_inline_kb(lang))
+        await event.answer(prompt_text, reply_markup=phone_share_kb(lang))
 
 
-@router.message(RegStates.pinfl)
-async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
+@router.message(RegStates.phone)
+async def reg_step_phone(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     lang = await get_lang(uid)
-    raw_query = (message.text or "").strip().replace(" ", "")
 
-    search_msg = await message.answer("⏳ <i>Yandex Pro bazasidan profilingiz real vaqtda qidirilmoqda...</i>")
-    y_driver, y_err = await yandex_api.find_driver_by_pinfl_or_query(raw_query)
+    if message.text in CANCEL_TEXTS or message.text in BACK_TEXTS:
+        await state.clear()
+        await message.answer(t(lang, "action_cancelled"), reply_markup=ReplyKeyboardRemove())
+        await message.answer("Bosh sahifa:", reply_markup=register_inline_kb(lang))
+        return
+
+    # Agar kontakt ulashilgan bo'lsa yoki matn ko'rinishida yozilgan bo'lsa
+    if message.contact:
+        raw_phone = message.contact.phone_number
+    else:
+        raw_phone = message.text or ""
+
+    clean_digits = re.sub(r"\D", "", raw_phone)
+    if len(clean_digits) < 9:
+        await message.answer("⚠️ Iltimos, telefon raqamingizni to'liq kiriting (kamida 9 ta raqam):")
+        return
+
+    search_msg = await message.answer("⏳ <i>Yandex Pro bazasidan profilingiz real vaqtda qidirilmoqda...</i>", reply_markup=ReplyKeyboardRemove())
+    y_driver, y_err = await yandex_api.find_driver_by_pinfl_or_query(clean_digits)
     try:
         await search_msg.delete()
     except Exception:
@@ -1721,11 +1766,10 @@ async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
     if not y_driver:
         err_extra = f"\n\n🔍 <i>Tizim xabari: {y_err}</i>" if y_err else ""
         await message.answer(
-            f"❌ <b>Ushbu ma'lumot bo'yicha {BOT_NAME} taksoparkida haydovchi topilmadi!</b>{err_extra}\n\n"
-            f"📌 <b>Quyidagilardan birini kiritib ko'ring:</b>\n"
-            f"1️⃣ 14 ta raqamli <b>JShShIR (PINFL)</b>\n"
-            f"2️⃣ Haydovchilik guvohnoma seriyasi (Masalan: <code>UZAF4922493</code>)\n"
-            f"3️⃣ Yandex Pro ga ulangan <b>Telefon raqamingiz</b> (Masalan: <code>913773200</code>)\n\n"
+            f"❌ <b>Ushbu telefon raqam ({raw_phone}) bo'yicha {BOT_NAME} taksoparkida haydovchi topilmadi!</b>{err_extra}\n\n"
+            f"📌 <b>Tekshirib ko'ring:</b>\n"
+            f"1️⃣ Siz Yandex Pro ga aynan shu raqam orqali ulangansizmi?\n"
+            f"2️⃣ Haydovchilik guvohnoma seriyasini kiritib ko'ring (Masalan: <code>UZAF4922493</code>)\n\n"
             f"📞 Bog'lanish: {SUPPORT_PHONE_DISPLAY}",
             reply_markup=back_inline_kb(lang)
         )
@@ -1738,9 +1782,8 @@ async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
     bal = y_driver.get("balance", 0)
 
     await state.update_data(
-        pinfl=raw_query,
+        phone=drv_phone or clean_phone_number(clean_digits),
         full_name=drv_nm,
-        phone=drv_phone,
         car_model=car_md,
         car_number=car_nb,
         yandex_driver_id=y_driver.get("id"),
@@ -1750,14 +1793,35 @@ async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
     found_text = (
         f"✅ <b>Siz {BOT_NAME} taksoparkimizda topildingiz!</b>\n\n"
         f"👤 <b>Haydovchi:</b> {drv_nm}\n"
-        f"📱 <b>Telefon raqam:</b> <code>{drv_phone}</code>\n"
+        f"📱 <b>Telefon:</b> <code>{drv_phone}</code>\n"
         f"🚗 <b>Avtotransport:</b> {car_md} (<code>{car_nb}</code>)\n"
         f"💰 <b>Yandexdagi joriy balans:</b> <b>{fmt_sum(bal)} so'm</b>\n\n"
-        f"💳 <b>Endi daromadingizni yechib olish uchun 16 talik plastik karta raqamingizni kiriting:</b>"
+        f"🪪 <b>Endi hisob-kitoblar va shaxsiy kodingiz uchun 14 ta raqamli JShShIR (PINFL) raqamingizni kiriting:</b>\n"
+        f"<i>(Masalan: 30508853460039)</i>"
     )
 
-    await state.set_state(RegStates.card)
+    await state.set_state(RegStates.pinfl)
     await message.answer(found_text, reply_markup=back_inline_kb(lang))
+
+
+@router.message(RegStates.pinfl)
+async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    lang = await get_lang(uid)
+    raw = (message.text or "").strip().replace(" ", "").replace("-", "")
+    pinfl_digits = re.sub(r"\D", "", raw)
+
+    if len(pinfl_digits) != 14:
+        await message.answer(
+            "⚠️ <b>JShShIR aynan 14 ta raqamdan iborat bo'lishi kerak!</b>\n"
+            "<i>Iltimos, tekshirib qayta kiriting (Masalan: 30508853460039):</i>",
+            reply_markup=back_inline_kb(lang)
+        )
+        return
+
+    await state.update_data(pinfl=pinfl_digits)
+    await state.set_state(RegStates.card)
+    await message.answer(t(lang, "reg_card"), reply_markup=back_inline_kb(lang))
 
 
 @router.message(RegStates.card)
@@ -1794,7 +1858,7 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
     await message.answer(t(lang, "reg_success", position=position), reply_markup=user_main_kb(lang, uid))
 
     admin_alert = (
-        f"🆕 <b>YANGI HAYDOVCHI RO'YXATDAN O'TDI! (JShShIR)</b>\n\n"
+        f"🆕 <b>YANGI HAYDOVCHI RO'YXATDAN O'TDI!</b>\n\n"
         f"🆔 POSITION: <code>{position}</code>\n"
         f"🪪 JShShIR: <code>{pinfl}</code>\n"
         f"👤 <b>Haydovchi:</b> {full_name}\n"
@@ -1853,7 +1917,7 @@ async def process_new_card(message: Message, state: FSMContext) -> None:
 
 
 # ============================================================
-# 12. BALANS (REAL VAQT VA DEPOZIT NAZORATI)
+# 12. BALANS (DOIMIY REAL VAQTDA YANGILANISH)
 # ============================================================
 
 @router.message(Command("balance"))
@@ -1862,7 +1926,11 @@ async def balance_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_inline_kb("uz"))
+        await message.answer(
+            "Iltimos, avval ro'yxatdan o'ting: /start",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        await message.answer("Ro'yxatdan o'tish:", reply_markup=register_inline_kb("uz"))
         return
 
     lang = user.get("language", "uz")
@@ -1871,15 +1939,11 @@ async def balance_handler(message: Message) -> None:
     y_id = user.get("yandex_driver_id")
     phone = user.get("phone")
 
-    has_pending = await db_has_pending_withdrawal(user["id"])
+    # DOIMIY YANGILASH: pending bor-yo'qligidan qat'i nazar jonli balans olinadi
     live_bal = await yandex_api.get_driver_balance(y_id, phone=phone)
-
     if live_bal is not None:
-        if not has_pending:
-            await db_update_balance(uid, live_bal)
-            cur_bal = live_bal
-        else:
-            cur_bal = int(user.get("balance", 0) or 0)
+        await db_update_balance(uid, live_bal)
+        cur_bal = live_bal
     else:
         cur_bal = int(user.get("balance", 0) or 0)
 
@@ -2652,7 +2716,6 @@ async def admin_sync_all_drivers(message: Message) -> None:
         )
         return
 
-    pending_yandex_ids = await db_get_pending_yandex_ids()
     updated_count = 0
     now = tashkent_now_iso()
 
@@ -2670,55 +2733,37 @@ async def admin_sync_all_drivers(message: Message) -> None:
 
         p_clean = clean_phone_number(phone) if phone else ""
 
-        if y_id in pending_yandex_ids:
-            if db_pool:
-                async with db_pool.acquire() as conn:
-                    await conn.execute(
-                        """UPDATE users SET full_name=$1, car_model=$2, car_number=$3, pinfl=$4, updated_at=$5
-                        WHERE yandex_driver_id=$6 OR phone=$7""",
-                        full_name, car_model, car_num, pinfl, now, y_id, p_clean,
-                    )
-            else:
-                conn = sqlite3.connect(DB_PATH, timeout=10)
-                with conn:
-                    conn.execute(
-                        """UPDATE users SET full_name=?, car_model=?, car_number=?, pinfl=?, updated_at=?
-                        WHERE yandex_driver_id=? OR phone=?""",
-                        (full_name, car_model, car_num, pinfl, now, y_id, p_clean),
-                    )
-                conn.close()
+        # DOIMIY UPDATE (Pending arizasi bo'lsa ham Yandex balansi yangilanadi)
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                res = await conn.execute(
+                    """UPDATE users SET 
+                        full_name=$1, car_model=$2, car_number=$3, 
+                        balance=$4, yandex_driver_id=$5, updated_at=$6 
+                    WHERE (yandex_driver_id=$5 OR phone=$7)""",
+                    full_name, car_model, car_num, bal, y_id, now, p_clean,
+                )
+                if res != "UPDATE 0":
+                    updated_count += 1
         else:
-            if db_pool:
-                async with db_pool.acquire() as conn:
-                    res = await conn.execute(
-                        """UPDATE users SET 
-                            full_name=$1, car_model=$2, car_number=$3, 
-                            balance=$4, yandex_driver_id=$5, pinfl=$6, updated_at=$7 
-                        WHERE (yandex_driver_id=$5 OR phone=$8) AND (balance != $4 OR car_number != $3 OR yandex_driver_id IS NULL)""",
-                        full_name, car_model, car_num, bal, y_id, pinfl, now, p_clean,
-                    )
-                    if res != "UPDATE 0":
-                        updated_count += 1
-            else:
-                conn = sqlite3.connect(DB_PATH, timeout=10)
-                with conn:
-                    cur = conn.execute(
-                        """UPDATE users SET 
-                            full_name=?, car_model=?, car_number=?, 
-                            balance=?, yandex_driver_id=?, pinfl=?, updated_at=? 
-                        WHERE (yandex_driver_id=? OR phone=?) AND (balance != ? OR car_number != ? OR yandex_driver_id IS NULL)""",
-                        (full_name, car_model, car_num, bal, y_id, pinfl, now, y_id, p_clean, bal, car_num),
-                    )
-                    if cur.rowcount > 0:
-                        updated_count += 1
-                conn.close()
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            with conn:
+                cur = conn.execute(
+                    """UPDATE users SET 
+                        full_name=?, car_model=?, car_number=?, 
+                        balance=?, yandex_driver_id=?, updated_at=? 
+                    WHERE (yandex_driver_id=? OR phone=?)""",
+                    (full_name, car_model, car_num, bal, y_id, now, y_id, p_clean),
+                )
+                if cur.rowcount > 0:
+                    updated_count += 1
+            conn.close()
 
     tot_drv = len(drivers)
     await status_msg.edit_text(
         f"✅ <b>Yandex sinxronlash muvaffaqiyatli yakunlandi!</b>\n\n"
         f"🚕 Jami Yandex haydovchilari: <b>{tot_drv} ta</b>\n"
-        f"🔄 Yangilanganlar: <b>{updated_count} ta</b>\n"
-        f"🔒 Arizasi ko'rib chiqilayotganlar: <b>{len(pending_yandex_ids)} ta</b>"
+        f"🔄 Yangilanganlar: <b>{updated_count} ta</b>"
     )
 
 
@@ -2776,9 +2821,7 @@ async def admin_list_drivers(message: Message) -> None:
                 st_icon = "⚪️ Oflayn"
 
             bal_str = f"{fmt_sum(live_bal)} so'm ({st_icon})"
-            has_pending = await db_has_pending_withdrawal(d_id)
-            if not has_pending and int(drv.get("balance", 0) or 0) != live_bal:
-                await db_update_balance(drv["telegram_id"], live_bal)
+            await db_update_balance(drv["telegram_id"], live_bal)
             if not y_id and y_info.get("id"):
                 if db_pool:
                     async with db_pool.acquire() as conn:
@@ -3006,7 +3049,6 @@ async def yandex_auto_sync_scheduler():
             await asyncio.sleep(300)
             drivers, _ = await yandex_api.get_all_drivers(force_refresh=True)
             if drivers:
-                pending_yandex_ids = await db_get_pending_yandex_ids()
                 now = tashkent_now_iso()
                 for raw_drv in drivers:
                     norm = yandex_api._normalize(raw_drv)
@@ -3016,50 +3058,31 @@ async def yandex_auto_sync_scheduler():
                     car_model = norm["car_model"]
                     full_name = norm["full_name"]
                     phone = norm["phone"]
-                    pinfl = norm["pinfl"]
                     if not y_id:
                         continue
 
                     p_clean = clean_phone_number(phone) if phone else ""
 
-                    if y_id in pending_yandex_ids:
-                        if db_pool:
-                            async with db_pool.acquire() as conn:
-                                await conn.execute(
-                                    """UPDATE users SET full_name=$1, car_model=$2, car_number=$3, pinfl=$4, updated_at=$5
-                                    WHERE yandex_driver_id=$6 OR phone=$7""",
-                                    full_name, car_model, car_num, pinfl, now, y_id, p_clean,
-                                )
-                        else:
-                            conn = sqlite3.connect(DB_PATH, timeout=10)
-                            with conn:
-                                conn.execute(
-                                    """UPDATE users SET full_name=?, car_model=?, car_number=?, pinfl=?, updated_at=?
-                                    WHERE yandex_driver_id=? OR phone=?""",
-                                    (full_name, car_model, car_num, pinfl, now, y_id, p_clean),
-                                )
-                            conn.close()
+                    if db_pool:
+                        async with db_pool.acquire() as conn:
+                            await conn.execute(
+                                """UPDATE users SET 
+                                    full_name=$1, car_model=$2, car_number=$3, 
+                                    balance=$4, yandex_driver_id=$5, updated_at=$6 
+                                WHERE (yandex_driver_id=$5 OR phone=$7)""",
+                                full_name, car_model, car_num, bal, y_id, now, p_clean,
+                            )
                     else:
-                        if db_pool:
-                            async with db_pool.acquire() as conn:
-                                await conn.execute(
-                                    """UPDATE users SET 
-                                        full_name=$1, car_model=$2, car_number=$3, 
-                                        balance=$4, yandex_driver_id=$5, pinfl=$6, updated_at=$7 
-                                    WHERE (yandex_driver_id=$5 OR phone=$8) AND (balance != $4 OR car_number != $3 OR yandex_driver_id IS NULL)""",
-                                    full_name, car_model, car_num, bal, y_id, pinfl, now, p_clean,
-                                )
-                        else:
-                            conn = sqlite3.connect(DB_PATH, timeout=10)
-                            with conn:
-                                conn.execute(
-                                    """UPDATE users SET 
-                                        full_name=?, car_model=?, car_number=?, 
-                                        balance=?, yandex_driver_id=?, pinfl=?, updated_at=? 
-                                    WHERE (yandex_driver_id=? OR phone=?) AND (balance != ? OR car_number != ? OR yandex_driver_id IS NULL)""",
-                                    (full_name, car_model, car_num, bal, y_id, pinfl, now, y_id, p_clean, bal, car_num),
-                                )
-                            conn.close()
+                        conn = sqlite3.connect(DB_PATH, timeout=10)
+                        with conn:
+                            conn.execute(
+                                """UPDATE users SET 
+                                    full_name=?, car_model=?, car_number=?, 
+                                    balance=?, yandex_driver_id=?, updated_at=? 
+                                WHERE (yandex_driver_id=? OR phone=?)""",
+                                (full_name, car_model, car_num, bal, y_id, now, y_id, p_clean),
+                            )
+                        conn.close()
         except Exception as e:
             logger.error(f"Avtomatik fon sinxronlash xatosi: {e}")
 
