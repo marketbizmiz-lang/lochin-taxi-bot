@@ -766,7 +766,7 @@ async def db_get_stats() -> dict:
         total_withdrawn = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
 
         pending_count   = conn.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'").fetchone()[0]
-        pending_sum     = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'").fetchone()[0]
+        pending_sum     = conn.execute("SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE status='pending'") or 0
         total_comm      = conn.execute("SELECT COALESCE(SUM(commission),0) FROM withdrawals WHERE status='completed'").fetchone()[0]
         conn.close()
 
@@ -845,7 +845,7 @@ async def db_force_complete_pending(user_id: Optional[int] = None) -> int:
 
 
 # ============================================================
-# 4. YANDEX FLEET API (REAL VAQT VA QIDIRUV ENGINE)
+# 4. YANDEX FLEET API (FIELDS TO'LIQ KELISHI VA JONLI QIDIRUV)
 # ============================================================
 
 class YandexFleetAPI:
@@ -858,7 +858,7 @@ class YandexFleetAPI:
         self._session: Optional[aiohttp.ClientSession] = None
         self._drivers_cache: List[dict] = []
         self._cache_ts: Optional[datetime] = None
-        self._cache_ttl = 30  # Real vaqt uchun keshni 30 soniyaga qisqartirdik
+        self._cache_ttl = 20  # Tezkor yangilanish
 
     def _is_configured(self) -> bool:
         return bool(self.api_key and self.park_id and self.client_id)
@@ -917,10 +917,12 @@ class YandexFleetAPI:
 
     def _normalize(self, raw_driver: dict) -> dict:
         prof = raw_driver.get("driver_profile", {})
+        person = raw_driver.get("person", {})
         car = raw_driver.get("car", {})
-        last = prof.get("last_name", "").strip()
-        first = prof.get("first_name", "").strip()
-        middle = prof.get("middle_name", "").strip()
+        
+        last = person.get("last_name", "") or prof.get("last_name", "")
+        first = person.get("first_name", "") or prof.get("first_name", "")
+        middle = person.get("middle_name", "") or prof.get("middle_name", "")
         full_name = f"{last} {first} {middle}".strip() or "Haydovchi"
 
         brand_model = car.get("brand_and_model", "").strip()
@@ -929,17 +931,15 @@ class YandexFleetAPI:
         car_title = brand_model or "Avtomobil"
         car_number = car.get("number", "").strip() or car.get("normalized_number", "").strip() or "Noma'lum"
 
-        phones = prof.get("phones", [])
+        phones = person.get("phones", []) or prof.get("phones", [])
+        if not phones and person.get("phone"):
+            phones = [person.get("phone")]
         if not phones and prof.get("phone"):
             phones = [prof.get("phone")]
         phone = clean_phone_number(phones[0]) if phones else ""
 
-        # PINFL / TIN / License
-        pinfl = ""
-        for k in ("tin", "inn", "personal_tax_number", "id"):
-            if prof.get(k):
-                pinfl = str(prof.get(k)).strip()
-                break
+        # PINFL / TIN
+        pinfl = str(person.get("tin", "") or person.get("inn", "") or prof.get("tin", "") or prof.get("inn", "")).strip()
 
         work_status = prof.get("work_status", "").lower()
         st_raw = str(raw_driver.get("status", "")).lower()
@@ -976,8 +976,17 @@ class YandexFleetAPI:
         try:
             session = await self._get_session()
             for _ in range(10):
+                # Barcha kerakli maydonlarni aniq so'raymiz:
                 payload = {
-                    "query": {"park": {"id": self.park_id}},
+                    "query": {
+                        "park": {"id": self.park_id}
+                    },
+                    "fields": {
+                        "account": ["balance", "currency", "type"],
+                        "car": ["brand", "model", "number", "normalized_number"],
+                        "driver_profile": ["id", "first_name", "last_name", "middle_name", "phones", "work_status"],
+                        "person": ["tin", "inn", "driver_license", "phones", "first_name", "last_name", "middle_name"]
+                    },
                     "limit": limit,
                     "offset": offset
                 }
@@ -1024,43 +1033,22 @@ class YandexFleetAPI:
 
         for raw in drivers:
             raw_str = json.dumps(raw, ensure_ascii=False)
+            norm = self._normalize(raw)
             # 1. 14 ta raqamli PINFL
-            if q_digits and (q_digits in raw_str):
-                return self._normalize(raw), ""
+            if q_digits and (q_digits in raw_str or (norm["pinfl"] and q_digits in norm["pinfl"])):
+                return norm, ""
             # 2. Guvohnoma seriyasi (masalan UZAF4922493)
             if len(q_clean) >= 6 and (q_clean.lower() in raw_str.lower()):
-                return self._normalize(raw), ""
+                return norm, ""
             # 3. Telefon oxirgi 9 ta raqami
             if len(q_digits) >= 9 and (q_digits[-9:] in raw_str):
-                return self._normalize(raw), ""
+                return norm, ""
 
         return None, ""
 
     async def get_driver_balance(self, yandex_driver_id: Optional[str] = None, phone: Optional[str] = None) -> Optional[int]:
         if not self._is_configured():
             return None
-
-        if yandex_driver_id:
-            url = f"{self.FLEET_BASE}/v1/parks/driver-profiles/list"
-            payload = {
-                "query": {
-                    "park": {
-                        "id": self.park_id,
-                        "driver_profile": {"id": [yandex_driver_id]}
-                    }
-                },
-                "limit": 1
-            }
-            try:
-                session = await self._get_session()
-                async with session.post(url, json=payload) as resp:
-                    if resp.status == 200:
-                        data = json.loads(await resp.text())
-                        drivers = data.get("driver_profiles", [])
-                        if drivers:
-                            return self._extract_balance(drivers[0])
-            except Exception:
-                pass
 
         drivers, _ = await self.get_all_drivers(force_refresh=False)
         clean_p = clean_phone_number(phone) if phone else ""
@@ -1308,7 +1296,7 @@ async def generate_monthly_excel_report() -> bytes:
 
 
 # ============================================================
-# 6. MATNLAR VA KLAVIATURALAR
+# 6. MATNLAR VA DIDOX-S USLUBIDAGI INLINE TUGMALAR
 # ============================================================
 
 TEXTS = {
@@ -1318,7 +1306,7 @@ TEXTS = {
         "reg_pinfl": (
             "🪪 <b>JShShIR (ПИНФЛ) raqamingizni kiriting:</b>\n\n"
             "<i>Haydovchilik guvohnomangizning <b>4d</b> bandidagi (yoki Pasport/ID-kartangizdagi) <b>14 ta raqam</b>ni kiriting:</i>\n\n"
-            "Misol: <code>30508853460039</code>"
+            "Misol: <code>31234567890123</code>"
         ),
         "reg_card": "💳 <b>Plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n<i>Misol: 8600 1234 5678 9012 yoki 9860...</i>",
         "reg_success": "✅ <b>Tabriklaymiz! Siz muvaffaqiyatli ro'yxatdan o'tdingiz.</b>\n\n🆔 Sizning POSITION ID: <code>{position}</code>\n🔑 Bu kod sizning taksoparkdagi shaxsiy kodingiz.",
@@ -1332,7 +1320,6 @@ TEXTS = {
         "menu_sos": "🆘 Yordam / SOS",
         "menu_admin": "🛠 Admin Panel",
         "btn_back": "⬅️ Orqaga",
-        "btn_cancel": "❌ Bekor qilish",
         "action_cancelled": "❌ Amaliyot bekor qilindi.",
         "withdraw_no_money": f"❌ Balansingizda yetarli mablag' yo'q!\nMinimal depozit qolishi shart: <b>{fmt_sum(MIN_DEPOSIT)} so'm</b>",
         "withdraw_min_err": f"❌ Minimal yechish summasi: {fmt_sum(MIN_WITHDRAWAL)} so'm",
@@ -1352,7 +1339,7 @@ TEXTS = {
         "reg_pinfl": (
             "🪪 <b>Введите ПИНФЛ (ЖШШИР):</b>\n\n"
             "<i>Введите 14 цифр из пункта <b>4d</b> вашего водительского удостоверения или паспорта:</i>\n\n"
-            "Пример: <code>30508853460039</code>"
+            "Пример: <code>31234567890123</code>"
         ),
         "reg_card": "💳 <b>Введите 16-значный номер карты:</b>\n\n<i>Пример: 8600 1234 5678 9012</i>",
         "reg_success": "✅ <b>Вы успешно зарегистрированы.</b>\n\n🆔 Ваш POSITION ID: <code>{position}</code>",
@@ -1366,7 +1353,6 @@ TEXTS = {
         "menu_sos": "🆘 Помощь / SOS",
         "menu_admin": "🛠 Админ Панель",
         "btn_back": "⬅️ Назад",
-        "btn_cancel": "❌ Отмена",
         "action_cancelled": "❌ Действие отменено.",
         "withdraw_no_money": f"❌ Недостаточно средств!\nМин. депозит: <b>{fmt_sum(MIN_DEPOSIT)} сум</b>",
         "withdraw_min_err": f"❌ Мин. сумма вывода: {fmt_sum(MIN_WITHDRAWAL)} сум",
@@ -1400,8 +1386,17 @@ def user_main_kb(lang: str, uid: int) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 
-def back_kb(lang: str) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t(lang, "btn_back"))]], resize_keyboard=True)
+def back_inline_kb(lang: str) -> InlineKeyboardMarkup:
+    """Haptic vibratsiya beruvchi Orqaga tugmasi"""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t(lang, "btn_back"), callback_data="nav_back_to_menu")
+    ]])
+
+
+def register_inline_kb(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=t(lang, "register_btn"), callback_data="start_reg_flow")
+    ]])
 
 
 def language_inline_kb() -> InlineKeyboardMarkup:
@@ -1409,10 +1404,6 @@ def language_inline_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="lang:uz"),
         InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru"),
     ]])
-
-
-def register_reply_kb(lang: str) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=t(lang, "register_btn"))]], resize_keyboard=True)
 
 
 def sos_menu_kb(lang: str) -> InlineKeyboardMarkup:
@@ -1446,7 +1437,7 @@ def admin_main_kb(lang: str) -> ReplyKeyboardMarkup:
 # ============================================================
 
 class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, limit: float = 0.25):
+    def __init__(self, limit: float = 0.2):
         self.limit = limit
         self.user_timestamps: Dict[int, float] = {}
         self.last_cleanup = time.time()
@@ -1463,7 +1454,7 @@ class ThrottlingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        # Haptic vibratsiya: har bir callback_query ga javob berish
+        # Har bir tugma bosilganda Telegramga haptic vibratsiya signali yuboriladi
         if isinstance(event, CallbackQuery):
             try:
                 await event.answer()
@@ -1519,8 +1510,8 @@ class AdminDeleteDriverStates(StatesGroup):
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
-dp.message.middleware(ThrottlingMiddleware(limit=0.25))
-dp.callback_query.middleware(ThrottlingMiddleware(limit=0.25))
+dp.message.middleware(ThrottlingMiddleware(limit=0.2))
+dp.callback_query.middleware(ThrottlingMiddleware(limit=0.2))
 
 router = Router()
 admin_router = Router()
@@ -1530,7 +1521,7 @@ CANCEL_TEXTS = {"❌ Bekor qilish", "❌ Отмена", "bekor", "отмена",
 
 
 async def set_main_menu_commands(bot_instance: Bot):
-    """Didox-S kabi chap pastdagi ko'k [Menyu] tugmasini sozlash"""
+    """Didox-S kabi chap pastdagi doimiy ko'k [Menyu] tugmasi"""
     commands = [
         BotCommand(command="start", description="Qayta ishga tushirish / Перезапуск"),
         BotCommand(command="menu", description="Asosiy menyu / Главное меню"),
@@ -1542,7 +1533,7 @@ async def set_main_menu_commands(bot_instance: Bot):
     try:
         await bot_instance.set_my_commands(commands, scope=BotCommandScopeDefault())
     except Exception as e:
-        logger.error(f"Menu commands o'rnatishda xatolik: {e}")
+        logger.error(f"Menu commands xatosi: {e}")
 
 
 async def get_lang(uid: int) -> str:
@@ -1557,7 +1548,7 @@ async def cmd_my_id(message: Message):
     await message.answer(
         f"🆔 <b>Sizning Telegram ID:</b> <code>{uid}</code>\n"
         f"👑 <b>Status:</b> {status_str}\n\n"
-        f"<i>Admin qilish uchun sozlamalarda `ADMIN_IDS` ga <code>{uid}</code> ni qo'shing.</i>"
+        f"<i>Admin qilish uchun Renderda `ADMIN_IDS` ga <code>{uid}</code> ni qo'shing.</i>"
     )
 
 
@@ -1585,6 +1576,20 @@ async def cmd_direct_admin(message: Message, state: FSMContext):
     await message.answer("🛠 <b>Admin Boshqaruv Paneli:</b>", reply_markup=admin_main_kb(lang))
 
 
+@router.callback_query(F.data == "nav_back_to_menu", StateFilter("*"))
+async def callback_back_to_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    uid = callback.from_user.id
+    user = await db_get_user(uid)
+    lang = user.get("language", "uz") if user else "uz"
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else user_main_kb(lang, uid)
+    await callback.message.answer(t(lang, "action_cancelled"), reply_markup=kb)
+
+
 @router.message(Command("menu"), StateFilter("*"))
 @router.message(Command("cancel"), StateFilter("*"))
 @router.message(F.text.in_(CANCEL_TEXTS), StateFilter("*"))
@@ -1594,7 +1599,7 @@ async def global_cancel_or_back_handler(message: Message, state: FSMContext) -> 
     uid = message.from_user.id
     user = await db_get_user(uid)
     lang = user.get("language", "uz") if user else "uz"
-    kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else register_reply_kb(lang)
+    kb = user_main_kb(lang, uid) if (user and user.get("is_registered") == 1) else user_main_kb(lang, uid)
     await message.answer(t(lang, "action_cancelled"), reply_markup=kb)
 
 
@@ -1638,30 +1643,36 @@ async def lang_callback(callback: CallbackQuery) -> None:
             reply_markup=user_main_kb(lang, uid),
         )
     else:
-        await callback.message.answer(t(lang, "welcome"), reply_markup=register_reply_kb(lang))
+        await callback.message.answer(t(lang, "welcome"), reply_markup=register_inline_kb(lang))
 
 
 # ============================================================
 # 10. JSHSHIR (PINFL) VA REAL VAQT INTEGRATSIYASI
 # ============================================================
 
+@router.callback_query(F.data == "start_reg_flow", StateFilter("*"))
 @router.message(F.text.in_(["📝 Ro'yxatdan o'tish", "📝 Регистрация"]), StateFilter("*"))
-async def reg_start_flow(message: Message, state: FSMContext) -> None:
+async def reg_start_flow(event: Any, state: FSMContext) -> None:
     await state.clear()
-    uid = message.from_user.id
+    uid = event.from_user.id
     user = await db_get_user(uid)
     lang = user.get("language", "uz") if user else "uz"
     if user and user.get("is_registered") == 1:
         pos_id = user.get("position") or "N/A"
         drv_name = user.get("full_name") or "Haydovchi"
-        await message.answer(
-            t(lang, "already_reg", position=pos_id, name=drv_name),
-            reply_markup=user_main_kb(lang, uid),
-        )
+        msg_text = t(lang, "already_reg", position=pos_id, name=drv_name)
+        if isinstance(event, CallbackQuery):
+            await event.message.answer(msg_text, reply_markup=user_main_kb(lang, uid))
+        else:
+            await event.answer(msg_text, reply_markup=user_main_kb(lang, uid))
         return
 
     await state.set_state(RegStates.pinfl)
-    await message.answer(t(lang, "reg_pinfl"), reply_markup=back_kb(lang))
+    prompt_text = t(lang, "reg_pinfl")
+    if isinstance(event, CallbackQuery):
+        await event.message.answer(prompt_text, reply_markup=back_inline_kb(lang))
+    else:
+        await event.answer(prompt_text, reply_markup=back_inline_kb(lang))
 
 
 @router.message(RegStates.pinfl)
@@ -1686,7 +1697,7 @@ async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
             f"2️⃣ Haydovchilik guvohnoma seriyasi (Masalan: <code>UZAF4922493</code>)\n"
             f"3️⃣ Yandex Pro ga ulangan <b>Telefon raqamingiz</b> (Masalan: <code>913773200</code>)\n\n"
             f"📞 Bog'lanish: {SUPPORT_PHONE_DISPLAY}",
-            reply_markup=back_kb(lang)
+            reply_markup=back_inline_kb(lang)
         )
         return
 
@@ -1716,7 +1727,7 @@ async def reg_step_pinfl(message: Message, state: FSMContext) -> None:
     )
 
     await state.set_state(RegStates.card)
-    await message.answer(found_text, reply_markup=back_kb(lang))
+    await message.answer(found_text, reply_markup=back_inline_kb(lang))
 
 
 @router.message(RegStates.card)
@@ -1727,7 +1738,7 @@ async def reg_step_card(message: Message, state: FSMContext) -> None:
     if not (card.isdigit() and len(card) == 16):
         await message.answer(
             "⚠️ <b>Plastik karta aynan 16 ta raqamdan iborat bo'lishi kerak!</b>\n<i>Misol: 8600 1234 5678 9012</i>",
-            reply_markup=back_kb(lang)
+            reply_markup=back_inline_kb(lang)
         )
         return
 
@@ -1790,7 +1801,7 @@ async def change_card_callback(callback: CallbackQuery, state: FSMContext) -> No
     await callback.message.answer(
         "💳 <b>Yangi plastik karta raqamingizni kiriting (16 ta raqam):</b>\n\n"
         "<i>Eski kartangiz o'rniga shu yangi karta saqlanadi.</i>",
-        reply_markup=back_kb(lang)
+        reply_markup=back_inline_kb(lang)
     )
 
 
@@ -1800,7 +1811,7 @@ async def process_new_card(message: Message, state: FSMContext) -> None:
     lang = await get_lang(uid)
     card = re.sub(r"\D", "", message.text or "")
     if not (card.isdigit() and len(card) == 16):
-        await message.answer("⚠️ Plastik karta aynan 16 ta raqam bo'lishi kerak:", reply_markup=back_kb(lang))
+        await message.answer("⚠️ Plastik karta aynan 16 ta raqam bo'lishi kerak:", reply_markup=back_inline_kb(lang))
         return
 
     await state.clear()
@@ -1821,7 +1832,7 @@ async def balance_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_inline_kb("uz"))
         return
 
     lang = user.get("language", "uz")
@@ -1903,7 +1914,7 @@ async def orders_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_inline_kb("uz"))
         return
 
     lang = user.get("language", "uz")
@@ -1956,7 +1967,7 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_inline_kb("uz"))
         return
 
     lang = user.get("language", "uz")
@@ -1991,7 +2002,7 @@ async def withdraw_start(message: Message, state: FSMContext) -> None:
         return
 
     await state.set_state(WithdrawStates.amount)
-    await message.answer(t(lang, "withdraw_ask", avail=fmt_sum(avail)), reply_markup=back_kb(lang))
+    await message.answer(t(lang, "withdraw_ask", avail=fmt_sum(avail)), reply_markup=back_inline_kb(lang))
 
 
 @router.message(WithdrawStates.amount)
@@ -2216,7 +2227,7 @@ async def profile_handler(message: Message) -> None:
     uid = message.from_user.id
     user = await db_get_user(uid)
     if not user or user.get("is_registered") != 1:
-        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_reply_kb("uz"))
+        await message.answer("Iltimos, avval ro'yxatdan o'ting: /start", reply_markup=register_inline_kb("uz"))
         return
     lang = user.get("language", "uz")
     y_val = "Ulangan ✅" if user.get("yandex_driver_id") else "Ulanmagan ❌"
@@ -2310,7 +2321,7 @@ async def sos_location_flow(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer(t(lang, "sos_ask_loc"), reply_markup=back_kb(lang))
+    await callback.message.answer(t(lang, "sos_ask_loc"), reply_markup=back_inline_kb(lang))
 
 
 @router.message(SOSStates.waiting_for_location, F.location)
@@ -2387,7 +2398,7 @@ async def sos_message_flow(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer(t(lang, "sos_ask_msg"), reply_markup=back_kb(lang))
+    await callback.message.answer(t(lang, "sos_ask_msg"), reply_markup=back_inline_kb(lang))
 
 
 @router.message(SOSStates.waiting_for_message)
@@ -2776,7 +2787,7 @@ async def admin_delete_driver_prompt(message: Message, state: FSMContext) -> Non
         "O'chirmoqchi bo'lgan haydovchining <b>POSITION ID</b>sini (masalan: <code>LCH-1416</code>), "
         "<b>JShShIR</b> yoki <b>Telefon raqami</b>ni yuboring:\n\n"
         "<i>Bekor qilish uchun '⬅️ Orqaga' tugmasini bosing.</i>",
-        reply_markup=back_kb(lang)
+        reply_markup=back_inline_kb(lang)
     )
 
 
@@ -2795,7 +2806,7 @@ async def admin_delete_driver_find(message: Message, state: FSMContext) -> None:
     if not driver:
         await message.answer(
             f"❌ <b>'{query}' bo'yicha haydovchi topilmadi!</b>\nIltimos, qayta kiriting:",
-            reply_markup=back_kb(lang)
+            reply_markup=back_inline_kb(lang)
         )
         return
 
@@ -2853,7 +2864,7 @@ async def admin_broadcast_prompt(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(AdminBroadcastStates.waiting_for_message)
     lang = await get_lang(message.from_user.id)
-    await message.answer("📢 <b>Barcha haydovchilarga yubormoqchi bo'lgan xabaringizni yozing:</b>\n\n<i>Bekor qilish: '⬅️ Orqaga'</i>", reply_markup=back_kb(lang))
+    await message.answer("📢 <b>Barcha haydovchilarga yubormoqchi bo'lgan xabaringizni yozing:</b>\n\n<i>Bekor qilish: '⬅️ Orqaga'</i>", reply_markup=back_inline_kb(lang))
 
 
 @admin_router.message(AdminBroadcastStates.waiting_for_message)
